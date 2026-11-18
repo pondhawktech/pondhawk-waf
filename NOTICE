@@ -1,0 +1,24 @@
+Pondhawk WAF
+Copyright Pond Hawk Technologies
+
+This product includes software derived from the following projects.
+
+OWASP Coraza WAF (https://github.com/corazawaf/coraza)
+  Licensed under the Apache License, Version 2.0.
+  Rule evaluation, transaction processing, SecLang parsing, operators, transformations, actions and body processors
+  are ported from Coraza v3. The Unicode best-fit table is generated from Coraza's unicode_bestfit.go.
+  The base configuration (pondhawk-waf.conf) is adapted from coraza.conf-recommended.
+
+OWASP Core Rule Set v4.30.0 (https://github.com/coreruleset/coreruleset)
+  Licensed under the Apache License, Version 2.0. Copyright (c) 2006-2020 Trustwave and contributors,
+  Copyright (c) 2021-2026 CRS project. Bundled unmodified in src/Pondhawk.Waf.CoreRuleSet/crs
+  (license: src/Pondhawk.Waf.CoreRuleSet/crs/LICENSE). Regression tests bundled in
+  tests/Pondhawk.Waf.CrsRegression/crs-tests.
+
+libinjection-go (https://github.com/corazawaf/libinjection-go)
+  Licensed under the BSD 3-Clause License. Copyright (c) 2022-Present, Coraza.
+  Ported to C# in src/Pondhawk.Waf.LibInjection (license: src/Pondhawk.Waf.LibInjection/LICENSE-libinjection.txt).
+  libinjection was created by Nick Galbreath.
+
+WHATWG HTML named character references (https://html.spec.whatwg.org/entities.json)
+  Used to generate src/Pondhawk.Waf/Transformations/HtmlEntities.cs.

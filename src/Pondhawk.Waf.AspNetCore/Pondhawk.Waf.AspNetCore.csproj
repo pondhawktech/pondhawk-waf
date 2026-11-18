@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Pondhawk.Waf.AspNetCore</RootNamespace>
+    <Description>ASP.NET Core middleware for the Pondhawk WAF engine.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Pondhawk.Waf\Pondhawk.Waf.csproj" />
+    <ProjectReference Include="..\Pondhawk.Waf.CoreRuleSet\Pondhawk.Waf.CoreRuleSet.csproj" />
+  </ItemGroup>
+</Project>

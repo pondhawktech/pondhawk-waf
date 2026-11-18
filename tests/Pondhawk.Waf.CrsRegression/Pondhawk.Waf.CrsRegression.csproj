@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <Description>Runs the OWASP CRS regression test suite against Pondhawk WAF on Kestrel.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="16.3.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Pondhawk.Waf.AspNetCore\Pondhawk.Waf.AspNetCore.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="crs-tests/**/*.yaml;coraza-overrides.yaml;kestrel-overrides.yaml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

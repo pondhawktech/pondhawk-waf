@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Pondhawk.Waf.LibInjection</RootNamespace>
+    <Description>C# port of libinjection-go (SQLi and XSS detection), BSD-3-Clause.</Description>
+    <PackageLicenseFile>LICENSE-libinjection.txt</PackageLicenseFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="LICENSE-libinjection.txt" Pack="true" PackagePath="" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pondhawk.Waf.LibInjection.Tests" />
+  </ItemGroup>
+
+</Project>

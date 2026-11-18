@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Pondhawk.Waf</RootNamespace>
+    <Description>SecLang web application firewall engine modeled after OWASP Coraza.</Description>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Pondhawk.Waf.Tests" />
+    <InternalsVisibleTo Include="Pondhawk.Waf.AspNetCore" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Pondhawk.Waf.LibInjection\Pondhawk.Waf.LibInjection.csproj" />
+  </ItemGroup>
+</Project>

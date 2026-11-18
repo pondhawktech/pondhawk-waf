@@ -1,0 +1,64 @@
+---
+# Expected differences between the CRS reference (Apache httpd) and ASP.NET Core Kestrel.
+# Each case is a request that Kestrel rejects or normalizes before the WAF middleware runs, so the application
+# never sees the original form. Same purpose as coraza-overrides.yaml for Go net/http.
+test_overrides:
+  - rule_id: 920100
+    test_ids: [4, 5]
+    reason: 'Kestrel rejects CONNECT request targets with 400 before the middleware runs.'
+    output:
+      status: 400
+  - rule_id: 920100
+    test_ids: [8]
+    reason: 'Kestrel accepts a colon in the path (Apache does not). The 920100 regex accepts this request line; the fragment rule 920610 fires.'
+    output:
+      log:
+        expect_ids: [920610]
+  - rule_id: 920100
+    test_ids: [13]
+    reason: 'Kestrel rejects the unknown protocol version with 505.'
+    output:
+      status: 505
+  - rule_id: 920210
+    test_ids: [2, 4, 6, 7]
+    reason: 'Kestrel normalizes a repeated Connection header value before the middleware runs; the application sees the normalized value.'
+    output:
+      log:
+        no_expect_ids: [920210]
+  - rule_id: 920270
+    test_ids: [4]
+    reason: 'Kestrel rejects the invalid Host header (localhost%00) with 400 before the middleware runs.'
+    output:
+      status: 400
+  - rule_id: 920280
+    test_ids: [3]
+    reason: 'Kestrel rejects the HTTP/0.9 request with 505 before the middleware runs.'
+    output:
+      status: 505
+  - rule_id: 920430
+    test_ids: [3, 9, 10]
+    reason: 'Kestrel rejects unsupported HTTP versions with 505 before the middleware runs.'
+    output:
+      status: 505
+  - rule_id: 920430
+    test_ids: [5]
+    reason: 'Kestrel does not support HTTP/0.9 and answers 400.'
+    output:
+      status: 400
+  - rule_id: 920610
+    test_ids: [2]
+    reason: 'Kestrel accepts a raw fragment in the request target (Apache returns 400); rule 920610 detects it.'
+    output:
+      log:
+        expect_ids: [920610]
+  - rule_id: 920620
+    test_ids: [1]
+    reason: 'Kestrel keeps both Content-Type headers (httpd concatenates them), so 920620 correctly detects the duplicate.'
+    output:
+      log:
+        expect_ids: [920620]
+  - rule_id: 934120
+    test_ids: [23, 24, 25, 26, 39]
+    reason: 'Kestrel rejects non-ASCII bytes in the request target with 400 before the middleware runs.'
+    output:
+      status: 400
