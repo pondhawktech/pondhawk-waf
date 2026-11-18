@@ -213,6 +213,24 @@ return fail == 0 ? 0 : 1;
 
 static (bool Ok, string Why) Check(Dictionary<object, object> output, HashSet<int> ids, int status, string? error)
 {
+    // any_of: alternative expectations, for behavior that differs between ASP.NET Core versions.
+    if (output.TryGetValue("any_of", out var anyOf) && anyOf is List<object> alternatives)
+    {
+        var whys = new List<string>();
+        foreach (var alternative in alternatives.OfType<Dictionary<object, object>>())
+        {
+            var (ok, altWhy) = Check(alternative, ids, status, error);
+            if (ok)
+            {
+                return (true, string.Empty);
+            }
+
+            whys.Add(altWhy);
+        }
+
+        return (false, "no alternative matched: " + string.Join(" | ", whys));
+    }
+
     if (output.TryGetValue("expect_error", out var expectError) && IsTrue(expectError))
     {
         return error is not null || status == 0 ? (true, string.Empty) : (false, $"expected a connection error, got {status}; ");

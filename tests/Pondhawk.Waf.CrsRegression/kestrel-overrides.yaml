@@ -10,10 +10,12 @@ test_overrides:
       status: 400
   - rule_id: 920100
     test_ids: [8]
-    reason: 'Kestrel accepts a colon in the path (Apache does not). The 920100 regex accepts this request line; the fragment rule 920610 fires.'
+    reason: 'Kestrel accepts a colon in the path (Apache does not). The 920100 regex accepts this request line. ASP.NET Core 10.0.14 and earlier keep the #fragment in the request target and the fragment rule 920610 fires; 10.0.15 and later reject a request target with a fragment with 400 before the middleware runs.'
     output:
-      log:
-        expect_ids: [920610]
+      any_of:
+        - log:
+            expect_ids: [920610]
+        - status: 400
   - rule_id: 920100
     test_ids: [13]
     reason: 'Kestrel rejects the unknown protocol version with 505.'
@@ -47,10 +49,12 @@ test_overrides:
       status: 400
   - rule_id: 920610
     test_ids: [2]
-    reason: 'Kestrel accepts a raw fragment in the request target (Apache returns 400); rule 920610 detects it.'
+    reason: 'Kestrel accepts a raw fragment in the request target (Apache returns 400). ASP.NET Core 10.0.14 and earlier pass it to the middleware and rule 920610 detects it; 10.0.15 and later reject a request target with a fragment with 400 before the middleware runs.'
     output:
-      log:
-        expect_ids: [920610]
+      any_of:
+        - log:
+            expect_ids: [920610]
+        - status: 400
   - rule_id: 920620
     test_ids: [1]
     reason: 'Kestrel keeps both Content-Type headers (httpd concatenates them), so 920620 correctly detects the duplicate.'
