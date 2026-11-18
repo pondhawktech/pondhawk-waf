@@ -191,6 +191,9 @@ internal sealed class SecLangParser(WafConfig config, IConfigFileSystem fs, Rege
             case "secrequestbodylimit":
                 config.RequestBodyLimit = long.Parse(opts, CultureInfo.InvariantCulture);
                 break;
+            case "secrequestbodynofileslimit":
+                config.RequestBodyNoFilesLimit = long.Parse(opts, CultureInfo.InvariantCulture);
+                break;
             case "secrequestbodyinmemorylimit":
                 config.RequestBodyInMemoryLimit = long.Parse(opts, CultureInfo.InvariantCulture);
                 break;
@@ -277,7 +280,6 @@ internal sealed class SecLangParser(WafConfig config, IConfigFileSystem fs, Rege
             case "secwebappid":
             case "secserversignature":
             case "secrxprefilter":
-            case "secrequestbodynofileslimit":
             case "secresponsebodyjsondepthlimit":
             case "secpcrematchlimit":
             case "secpcrematchlimitrecursion":

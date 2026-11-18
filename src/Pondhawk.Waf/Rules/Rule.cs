@@ -123,12 +123,12 @@ public sealed class Rule
 
     public void ClearTransformations() => Transformations.Clear();
 
-    internal void Evaluate(int phase, Transaction tx, Dictionary<(int, string), string> cache)
+    internal void Evaluate(int phase, Transaction tx, TransformationCache cache)
     {
         DoEvaluate(phase, tx, 0, cache);
     }
 
-    private List<RuleMatch>? DoEvaluate(int phase, Transaction tx, int chainLevel, Dictionary<(int, string), string> cache)
+    private List<RuleMatch>? DoEvaluate(int phase, Transaction tx, int chainLevel, TransformationCache cache)
     {
         tx.Capturing = Capture;
 
@@ -184,7 +184,7 @@ public sealed class Rule
                         if (!cache.TryGetValue(key, out var transformed))
                         {
                             transformed = Transform(arg.Value);
-                            cache[key] = transformed;
+                            cache.Add(key, transformed);
                         }
 
                         args.Add(transformed);

@@ -14,7 +14,7 @@ namespace Pondhawk.Waf;
 /// </summary>
 public sealed class Transaction : IDisposable
 {
-    private readonly Dictionary<(int, string), string> _transformationCache = [];
+    private readonly TransformationCache _transformationCache = new();
     private readonly HashSet<int> _removedRuleIds = [];
     private readonly List<(int Start, int End)> _removedRuleRanges = [];
     private readonly Dictionary<int, List<(Variable Variable, VariableException Exception)>> _removedTargets = [];
@@ -259,8 +259,14 @@ public sealed class Transaction : IDisposable
     }
 
     /// <summary>
-    /// Buffers request body bytes. Returns an interruption when the body exceeds the limit and the limit action is Reject.
-    /// Returns the number of bytes accepted.
+    /// Buffers request body bytes and returns the number of bytes accepted. Past the limit:
+    /// <list type="bullet">
+    /// <item>Reject with SecRuleEngine On: returns a 413 interruption.</item>
+    /// <item>Reject in DetectionOnly: records the 413 as <see cref="DetectionOnlyInterruption"/> and accepts no more
+    /// bytes; the body is inspected up to the limit.</item>
+    /// <item>ProcessPartial: runs phase 2 on the bytes up to the limit and accepts no more.</item>
+    /// </list>
+    /// A return value lower than the input length without an interruption means: stop writing; the rest is not inspected.
     /// </summary>
     public (Interruption? Interruption, int Written) WriteRequestBody(ReadOnlySpan<byte> data)
     {
@@ -269,24 +275,25 @@ public sealed class Transaction : IDisposable
             return (null, 0);
         }
 
-        if (_requestBody.Length == RequestBodyLimit)
-        {
-            return Waf.Config.RequestBodyLimitAction == BodyLimitAction.Reject ? (Interruption, 0) : (null, 0);
-        }
-
+        var limit = EffectiveRequestBodyLimit;
         var writing = (long)data.Length;
         var processNow = false;
-        if (_requestBody.Length + writing > RequestBodyLimit)
+        if (_requestBody.Length + writing > limit)
         {
             Variables.InboundDataError.Set("1");
+            writing = Math.Max(0, limit - _requestBody.Length);
             if (Waf.Config.RequestBodyLimitAction == BodyLimitAction.Reject)
             {
-                Interruption = new Interruption(0, "deny", 413, null);
-                return (Interruption, 0);
+                Interrupt(new Interruption(0, "deny", 413, null));
+                if (IsInterrupted)
+                {
+                    return (Interruption, 0);
+                }
             }
-
-            writing = RequestBodyLimit - _requestBody.Length;
-            processNow = Waf.Config.RequestBodyLimitAction == BodyLimitAction.ProcessPartial;
+            else
+            {
+                processNow = Waf.Config.RequestBodyLimitAction == BodyLimitAction.ProcessPartial;
+            }
         }
 
         _requestBody.Write(data[..(int)writing]);
@@ -299,11 +306,12 @@ public sealed class Transaction : IDisposable
     }
 
     /// <summary>
-    /// Rejects a request whose declared length exceeds the body limit, without reading it (limit action Reject only).
+    /// Rejects a request whose declared length exceeds the body limit, without reading it (limit action Reject and
+    /// SecRuleEngine On only; DetectionOnly records the interruption and returns null).
     /// </summary>
     public Interruption? CheckDeclaredRequestBodyLength(long length)
     {
-        if (IsRuleEngineOff || !RequestBodyAccess || length <= RequestBodyLimit)
+        if (IsRuleEngineOff || !RequestBodyAccess || length <= EffectiveRequestBodyLimit)
         {
             return null;
         }
@@ -314,8 +322,23 @@ public sealed class Transaction : IDisposable
             return null;
         }
 
-        Interruption = new Interruption(0, "deny", 413, null);
+        Interrupt(new Interruption(0, "deny", 413, null));
         return Interruption;
+    }
+
+    // A body that a processor turns entirely into ARGS or REQUEST_BODY (everything but multipart, whose files are not
+    // inspected by content) is held to SecRequestBodyNoFilesLimit as well. Known after phase 1, which may set the
+    // processor with ctl:requestBodyProcessor.
+    private long EffectiveRequestBodyLimit
+    {
+        get
+        {
+            var noFiles = Waf.Config.RequestBodyNoFilesLimit;
+            var processor = Variables.ReqbodyProcessor.Value;
+            var fieldsOnly = ForceRequestBodyVariable
+                             || (processor.Length > 0 && !processor.Equals("MULTIPART", StringComparison.OrdinalIgnoreCase));
+            return fieldsOnly && noFiles > 0 ? Math.Min(RequestBodyLimit, noFiles) : RequestBodyLimit;
+        }
     }
 
     public Interruption? ProcessRequestBody()
@@ -351,7 +374,7 @@ public sealed class Transaction : IDisposable
         var mime = Variables.RequestHeaders.GetFirst("content-type") ?? string.Empty;
         try
         {
-            var options = new BodyProcessorOptions(mime, Waf.Config.RequestBodyJsonDepthLimit, Waf.Config.ArgumentsLimit);
+            var options = new BodyProcessorOptions(mime, Waf.Config.RequestBodyJsonDepthLimit, Waf.Config.ArgumentsLimit, Waf.Config.RequestBodyNoFilesLimit);
             if (!BodyProcessor.TryProcessRequest(processor, _requestBody.ReadAll(), this, options))
             {
                 RequestBodyError("invalid body processor");
@@ -406,7 +429,7 @@ public sealed class Transaction : IDisposable
 
     /// <summary>
     /// True when the response body is inspected: SecResponseBodyAccess is on and the response MIME type is listed in
-    /// SecResponseBodyMimeType (or ctl:forceResponseBodyVariable is on).
+    /// SecResponseBodyMimeType (or ctl:forceResponseBodyVariable is on). See <see cref="IsInspectedMimeType"/>.
     /// </summary>
     public bool IsResponseBodyProcessable
     {
@@ -422,9 +445,48 @@ public sealed class Transaction : IDisposable
                 return true;
             }
 
-            var ct = Variables.ResponseContentType.Value;
-            return Waf.Config.ResponseBodyMimeTypes.Contains(ct, StringComparer.OrdinalIgnoreCase);
+            return IsInspectedMimeType(Variables.ResponseContentType.Value, Waf.Config.ResponseBodyMimeTypes);
         }
+    }
+
+    /// <summary>
+    /// Matches a response MIME type against SecResponseBodyMimeType. The client often picks the format (Accept), so a
+    /// listed type also covers its equivalents:
+    /// <list type="bullet">
+    /// <item>application/json covers every */json and */*+json type (text/json, application/vnd.api+json);</item>
+    /// <item>application/xml or text/xml covers every */xml and */*+xml type;</item>
+    /// <item>a response without Content-Type is treated as text/plain.</item>
+    /// </list>
+    /// </summary>
+    public static bool IsInspectedMimeType(string mimeType, IReadOnlyCollection<string> listed)
+    {
+        var ct = mimeType.Trim().ToLowerInvariant();
+        if (ct.Length == 0)
+        {
+            ct = "text/plain";
+        }
+
+        if (listed.Contains(ct, StringComparer.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var slash = ct.IndexOf('/', StringComparison.Ordinal);
+        if (slash < 0)
+        {
+            return false;
+        }
+
+        var subtype = ct[(slash + 1)..];
+        if ((subtype == "json" || subtype.EndsWith("+json", StringComparison.Ordinal))
+            && listed.Contains("application/json", StringComparer.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return (subtype == "xml" || subtype.EndsWith("+xml", StringComparison.Ordinal))
+               && (listed.Contains("application/xml", StringComparer.OrdinalIgnoreCase)
+                   || listed.Contains("text/xml", StringComparer.OrdinalIgnoreCase));
     }
 
     /// <summary>Set by ctl:forceResponseBodyVariable: inspect the response body whatever its MIME type.</summary>
@@ -448,8 +510,11 @@ public sealed class Transaction : IDisposable
             Variables.OutboundDataError.Set("1");
             if (Waf.Config.ResponseBodyLimitAction == BodyLimitAction.Reject)
             {
-                Interruption = new Interruption(0, "deny", 500, null);
-                return (Interruption, 0);
+                Interrupt(new Interruption(0, "deny", 500, null));
+                if (IsInterrupted)
+                {
+                    return (Interruption, 0);
+                }
             }
 
             writing = ResponseBodyLimit - _responseBody.Length;
@@ -480,7 +545,10 @@ public sealed class Transaction : IDisposable
             return Interruption;
         }
 
-        var body = _responseBody.ReadAll();
+        var body = ResponseBodyAsUtf8(_responseBody.ReadAll());
+        // RESPONSE_BODY is set with or without a body processor: the data leakage rules (950-956) read it.
+        Variables.ResponseBody.Set(ByteString.FromBytes(body));
+        Variables.ResponseContentLength.Set(body.Length.ToString(CultureInfo.InvariantCulture));
         var processor = Variables.ResBodyProcessor.Value;
         if (processor.Length > 0)
         {
@@ -496,14 +564,54 @@ public sealed class Transaction : IDisposable
                 ResponseBodyError(ex.Message);
             }
         }
-        else
-        {
-            Variables.ResponseBody.Set(ByteString.FromBytes(body));
-            Variables.ResponseContentLength.Set(body.Length.ToString(CultureInfo.InvariantCulture));
-        }
 
         Eval(Phases.ResponseBody);
         return Interruption;
+    }
+
+    // Rules match bytes of ASCII-compatible text. A UTF-16 or UTF-32 body (Content-Type charset or BOM, which the client
+    // can request with Accept-Charset) is transcoded to UTF-8 for inspection; the client still gets the original.
+    private byte[] ResponseBodyAsUtf8(byte[] body)
+    {
+        var contentType = Variables.ResponseHeaders.GetFirst("content-type") ?? string.Empty;
+        var charset = string.Empty;
+        foreach (var part in contentType.Split(';'))
+        {
+            var p = part.Trim();
+            if (p.StartsWith("charset=", StringComparison.OrdinalIgnoreCase))
+            {
+                charset = p["charset=".Length..].Trim('"', ' ').ToLowerInvariant();
+            }
+        }
+
+        System.Text.Encoding? encoding = charset switch
+        {
+            "utf-16" or "utf-16le" or "unicode" or "ucs-2" => System.Text.Encoding.Unicode,
+            "utf-16be" or "unicodefffe" => System.Text.Encoding.BigEndianUnicode,
+            "utf-32" or "utf-32le" => System.Text.Encoding.UTF32,
+            "utf-32be" => new System.Text.UTF32Encoding(bigEndian: true, byteOrderMark: true),
+            _ => null,
+        };
+
+        var span = body.AsSpan();
+        if (span.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xFE, 0x00, 0x00]))
+        {
+            encoding = System.Text.Encoding.UTF32;
+        }
+        else if (span.StartsWith((ReadOnlySpan<byte>)[0x00, 0x00, 0xFE, 0xFF]))
+        {
+            encoding = new System.Text.UTF32Encoding(bigEndian: true, byteOrderMark: true);
+        }
+        else if (span.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xFE]))
+        {
+            encoding = System.Text.Encoding.Unicode;
+        }
+        else if (span.StartsWith((ReadOnlySpan<byte>)[0xFE, 0xFF]))
+        {
+            encoding = System.Text.Encoding.BigEndianUnicode;
+        }
+
+        return encoding is null ? body : System.Text.Encoding.UTF8.GetBytes(encoding.GetString(body));
     }
 
     private void ResponseBodyError(string message)
@@ -533,14 +641,10 @@ public sealed class Transaction : IDisposable
             var status = Interruption?.Status.ToString(CultureInfo.InvariantCulture)
                          ?? DetectionOnlyInterruption?.Status.ToString(CultureInfo.InvariantCulture)
                          ?? Variables.ResponseStatus.Value;
+            // Relevant: a rule with auditlog matched, the WAF interrupted, or the status matches SecAuditLogRelevantStatus.
             var relevant = Waf.Config.AuditLogRelevantStatus;
             var statusRelevant = relevant is not null && relevant.IsMatch(status);
-            if (!_audit && !statusRelevant)
-            {
-                return;
-            }
-
-            if (_audit && relevant is not null && !statusRelevant)
+            if (!_audit && Interruption is null && DetectionOnlyInterruption is null && !statusRelevant)
             {
                 return;
             }
@@ -621,10 +725,14 @@ public sealed class Transaction : IDisposable
             }
         }
 
+        // Logs get at most 512 bytes of msg and logdata, and never the value of a cookie, credential header or
+        // password-like argument (CRS logdata copies the matched value).
+        message = LogRedaction.Truncate(message);
+        data = LogRedaction.IsSensitive(matches) ? LogRedaction.Redacted : LogRedaction.Truncate(data);
         var matched = new MatchedRule(
             rule,
             Id,
-            Variables.RequestUri.Value,
+            LogRedaction.RedactQuery(Variables.RequestUri.Value),
             Variables.RemoteAddr.Value,
             Variables.ServerName.Value.Length > 0 ? Variables.ServerName.Value : Variables.RequestHeaders.GetFirst("host") ?? string.Empty,
             message,
@@ -633,9 +741,18 @@ public sealed class Transaction : IDisposable
             disruptiveName,
             disruptiveName is not null and not "pass" && RuleEngine == RuleEngineMode.On);
         _matchedRules.Add(matched);
-        if (rule.Log)
+        if (rule.Log && Waf.Config.ErrorCallback is { } callback)
         {
-            Waf.Config.ErrorCallback?.Invoke(matched);
+            try
+            {
+                callback(matched);
+            }
+#pragma warning disable CA1031 // A failing log sink must not decide whether requests succeed.
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+                Waf.RecordLogFailure();
+            }
         }
     }
 

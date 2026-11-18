@@ -27,7 +27,7 @@ public static class OperatorRegistry
     private static readonly FrozenDictionary<string, Func<OperatorOptions, IOperator>> Factories =
         new Dictionary<string, Func<OperatorOptions, IOperator>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["rx"] = o => new RxOperator(o.RegexCache.Get(o.Arguments)),
+            ["rx"] = o => new RxOperator(o.RegexCache.Get(o.Arguments), RegexCache.UsesWordBoundary(o.Arguments)),
             ["pm"] = o => new PmOperator(o.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)),
             ["pmFromFile"] = o => new PmOperator(ReadDataFile(o)),
             ["pmf"] = o => new PmOperator(ReadDataFile(o)),
@@ -182,7 +182,7 @@ public sealed class RegexCache
 
     private Regex Compile(string pattern, RegexOptions extra)
     {
-        var translated = TranslatePattern(pattern);
+        var translated = TranslatePattern(pattern, remapHighBytes: extra != RegexOptions.None && UsesWordBoundary(pattern));
         var options = RegexOptions.CultureInvariant | extra;
         if (PreferNonBacktracking)
         {
@@ -207,9 +207,14 @@ public sealed class RegexCache
     /// <item>escaped punctuation inside a character class, e.g. [\--9]: .NET does not accept an escaped character as a
     /// range start, so it is rewritten as \xHH;</item>
     /// <item>a bare '[' inside a class, which .NET can read as class subtraction ("-[").</item>
+    /// <item>\w, \W, \d, \D, \s and \S, which are ASCII-only in RE2 but Unicode in .NET: byte strings hold bytes
+    /// 0x80-0xFF as Latin-1 letters and spaces (é, ª, NBSP), so "%C2%AAeval(" would hide "eval" from \b and \w.</item>
     /// </list>
+    /// With <paramref name="remapHighBytes"/> (patterns with \b or \B), byte escapes 0x80-0xFF become U+E080-U+E0FF,
+    /// matching inputs passed through <see cref="RemapHighBytes"/>: .NET has no ASCII-only \b, and private-use
+    /// characters are not word characters.
     /// </summary>
-    internal static string TranslatePattern(string pattern)
+    internal static string TranslatePattern(string pattern, bool remapHighBytes = false)
     {
         var sb = new StringBuilder(pattern.Length + 16);
         var inClass = false;
@@ -225,10 +230,26 @@ public sealed class RegexCache
                     if (close > i + 3 && int.TryParse(pattern.AsSpan(i + 3, close - i - 3), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var code))
                     {
                         // Coraza matches \x{HH} (HH <= ff) as a raw byte; byte strings hold bytes as chars.
-                        sb.Append(code <= 0xff ? $"\\x{code:x2}" : $"\\u{code:x4}");
+                        sb.Append(code is >= 0x80 and <= 0xff && remapHighBytes ? $"\\u{0xE000 + code:x4}"
+                            : code <= 0xff ? $"\\x{code:x2}" : $"\\u{code:x4}");
                         i = close;
                         continue;
                     }
+                }
+
+                if (next == 'x' && remapHighBytes && i + 3 < pattern.Length && ByteString.IsHex(pattern[i + 2]) && ByteString.IsHex(pattern[i + 3]))
+                {
+                    var code = (ByteString.HexValue(pattern[i + 2]) << 4) | ByteString.HexValue(pattern[i + 3]);
+                    sb.Append(code >= 0x80 ? $"\\u{0xE000 + code:x4}" : $"\\x{code:x2}");
+                    i += 3;
+                    continue;
+                }
+
+                if (AsciiClass(next, inClass) is { } ascii)
+                {
+                    sb.Append(ascii);
+                    i++;
+                    continue;
                 }
 
                 if (inClass && !char.IsAsciiLetterOrDigit(next) && next < 0x80)
@@ -282,6 +303,12 @@ public sealed class RegexCache
                 continue;
             }
 
+            if (remapHighBytes && c is >= '\u0080' and <= '\u00ff')
+            {
+                sb.Append($"\\u{0xE000 + c:x4}");
+                continue;
+            }
+
             if (c == '(' && string.CompareOrdinal(pattern, i, "(?P<", 0, 4) == 0)
             {
                 sb.Append("(?<");
@@ -294,20 +321,119 @@ public sealed class RegexCache
 
         return sb.ToString();
     }
+
+    /// <summary>True when the pattern uses \b or \B (outside a character class).</summary>
+    internal static bool UsesWordBoundary(string pattern)
+    {
+        var inClass = false;
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            var c = pattern[i];
+            if (c == '\\' && i + 1 < pattern.Length)
+            {
+                if (!inClass && pattern[i + 1] is 'b' or 'B')
+                {
+                    return true;
+                }
+
+                i++;
+            }
+            else if (c == '[')
+            {
+                inClass = true;
+            }
+            else if (c == ']')
+            {
+                inClass = false;
+            }
+        }
+
+        return false;
+    }
+
+    [ThreadStatic]
+    private static string? _lastInput;
+
+    [ThreadStatic]
+    private static string? _lastRemapped;
+
+    /// <summary>Moves chars 0x80-0xFF to U+E080-U+E0FF (see <see cref="TranslatePattern"/>). ASCII input is returned as is.</summary>
+    internal static string RemapHighBytes(string value)
+    {
+        if (value.AsSpan().IndexOfAnyInRange('\u0080', '\u00ff') < 0)
+        {
+            return value;
+        }
+
+        // Many rules evaluate the same value in a row.
+        if (ReferenceEquals(value, _lastInput))
+        {
+            return _lastRemapped!;
+        }
+
+        var remapped = string.Create(value.Length, value, static (span, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+            {
+                var c = source[i];
+                span[i] = c is >= '\u0080' and <= '\u00ff' ? (char)(0xE000 + c) : c;
+            }
+        });
+        _lastInput = value;
+        _lastRemapped = remapped;
+        return remapped;
+    }
+
+    internal static string UnmapHighBytes(string value)
+    {
+        if (value.AsSpan().IndexOfAnyInRange('\ue080', '\ue0ff') < 0)
+        {
+            return value;
+        }
+
+        return string.Create(value.Length, value, static (span, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+            {
+                var c = source[i];
+                span[i] = c is >= '\ue080' and <= '\ue0ff' ? (char)(c - 0xE000) : c;
+            }
+        });
+    }
+
+    // RE2 classes are ASCII-only; .NET's are Unicode. Byte strings use chars up to 0xFF (and U+E080-U+E0FF after
+    // remapping), so the complements run to U+FFFF.
+    private static string? AsciiClass(char escape, bool inClass) => (escape, inClass) switch
+    {
+        ('w', false) => "[0-9A-Za-z_]",
+        ('w', true) => "0-9A-Za-z_",
+        ('W', false) => "[^0-9A-Za-z_]",
+        ('W', true) => "\\x00-\\x2f\\x3a-\\x40\\x5b-\\x5e\\x60\\x7b-\\uffff",
+        ('d', false) => "[0-9]",
+        ('d', true) => "0-9",
+        ('D', false) => "[^0-9]",
+        ('D', true) => "\\x00-\\x2f\\x3a-\\uffff",
+        ('s', false) => "[\\t\\n\\f\\r ]",
+        ('s', true) => "\\t\\n\\f\\r\\x20",
+        ('S', false) => "[^\\t\\n\\f\\r ]",
+        ('S', true) => "\\x00-\\x08\\x0b\\x0e-\\x1f\\x21-\\uffff",
+        _ => null,
+    };
 }
 
-internal sealed class RxOperator(Regex regex) : IOperator
+internal sealed class RxOperator(Regex regex, bool remapHighBytes = false) : IOperator
 {
     public Regex Regex { get; } = regex;
 
     public bool Evaluate(Transaction tx, string value)
     {
+        var input = remapHighBytes ? RegexCache.RemapHighBytes(value) : value;
         if (!tx.Capturing)
         {
-            return Regex.IsMatch(value);
+            return Regex.IsMatch(input);
         }
 
-        var match = Regex.Match(value);
+        var match = Regex.Match(input);
         if (!match.Success)
         {
             return false;
@@ -316,7 +442,8 @@ internal sealed class RxOperator(Regex regex) : IOperator
         for (var i = 0; i < match.Groups.Count && i < 9; i++)
         {
             var g = match.Groups[i];
-            tx.CaptureField(i, g.Success ? g.Value : string.Empty);
+            var captured = g.Success ? g.Value : string.Empty;
+            tx.CaptureField(i, remapHighBytes ? RegexCache.UnmapHighBytes(captured) : captured);
         }
 
         return true;

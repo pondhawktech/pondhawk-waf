@@ -8,7 +8,7 @@ using Pondhawk.Waf.Text;
 namespace Pondhawk.Waf.BodyProcessors;
 
 /// <summary>Options passed to a request body processor.</summary>
-public sealed record BodyProcessorOptions(string ContentType, int JsonDepthLimit, int ArgumentsLimit);
+public sealed record BodyProcessorOptions(string ContentType, int JsonDepthLimit, int ArgumentsLimit, long NoFilesLimit = 0);
 
 /// <summary>A request body could not be parsed. Sets REQBODY_ERROR.</summary>
 public sealed class BodyProcessorException(string message) : Exception(message);
@@ -94,9 +94,18 @@ public static class BodyProcessor
 
         using (doc)
         {
-            var state = new JsonFlattenState(options.ArgumentsLimit);
+            var state = new JsonFlattenState(options.ArgumentsLimit, KeyBudget(body.Length));
             var key = new StringBuilder("json");
-            Flatten(doc.RootElement, key, target, state);
+            try
+            {
+                Flatten(doc.RootElement, key, target, state);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+            {
+                // A string that is valid JSON syntax but not valid text: a lone surrogate escape or invalid UTF-8.
+                throw new BodyProcessorException("invalid JSON string: " + ex.Message);
+            }
+
             if (state.Truncated)
             {
                 tx.Variables.ArgumentsLimitReached.Set("1");
@@ -104,7 +113,11 @@ public static class BodyProcessor
         }
     }
 
-    private sealed class JsonFlattenState(int limit)
+    // Every leaf repeats its full key path, so a long key above a large array multiplies the body many times over.
+    // Legitimate documents stay far below four times the body size.
+    private static long KeyBudget(int bodyLength) => (4L * bodyLength) + 4096;
+
+    private sealed class JsonFlattenState(int limit, long keyBudget)
     {
         public int Limit { get; } = limit;
 
@@ -113,6 +126,17 @@ public static class BodyProcessor
         public bool Truncated { get; set; }
 
         public bool Full => Limit > 0 && Count >= Limit;
+
+        public void Add(Collections.MapCollection target, StringBuilder key, string value)
+        {
+            keyBudget -= key.Length;
+            if (keyBudget < 0)
+            {
+                throw new BodyProcessorException("JSON key names exceed four times the body size");
+            }
+
+            target.Add(key.ToString(), value);
+        }
     }
 
     private static void Flatten(JsonElement element, StringBuilder key, Collections.MapCollection target, JsonFlattenState state)
@@ -155,7 +179,7 @@ public static class BodyProcessor
                 if (index > 0 && !state.Full)
                 {
                     // The array length, as Coraza records it.
-                    target.Add(key.ToString(), index.ToString(CultureInfo.InvariantCulture));
+                    state.Add(target, key, index.ToString(CultureInfo.InvariantCulture));
                 }
 
                 break;
@@ -172,7 +196,7 @@ public static class BodyProcessor
                     JsonValueKind.Null => string.Empty,
                     _ => element.GetRawText(),
                 };
-                target.Add(key.ToString(), value);
+                state.Add(target, key, value);
                 state.Count++;
                 break;
         }

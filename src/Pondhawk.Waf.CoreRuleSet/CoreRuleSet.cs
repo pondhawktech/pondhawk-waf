@@ -26,6 +26,9 @@ public static class CoreRuleSetFiles
     /// <summary>The directives that load all CRS rule files.</summary>
     public const string RuleDirectives = "Include rules/*.conf";
 
+    /// <summary>The Pondhawk base configuration alone (engine settings and body processing), for use without CRS.</summary>
+    public const string EngineDirectives = "Include pondhawk-waf.conf";
+
     private static IReadOnlyDictionary<string, string> Load()
     {
         var asm = typeof(CoreRuleSetFiles).Assembly;

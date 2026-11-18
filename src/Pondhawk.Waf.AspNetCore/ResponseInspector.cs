@@ -48,9 +48,20 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
 
     public PipeWriter Writer => _writer ??= PipeWriter.Create(this, new StreamPipeWriterOptions(leaveOpen: true));
 
+    /// <summary>
+    /// A streaming response (server-sent events, streamed JSON) asks for its writes to go out at once. Holding it until
+    /// the application finishes would stall the client, so phase 4 runs on what is held now and the rest streams
+    /// through uninspected, as with a response over the limit.
+    /// </summary>
     public void DisableBuffering()
     {
-        // Inspected bodies must be held until phase 4 has run; other bodies are not buffered here anyway.
+        BeginResponse();
+        if (_state == State.Holding)
+        {
+            Interruption = _tx.ProcessResponseBody();
+            _state = Interruption is null ? State.PassThrough : State.Blocked;
+        }
+
         if (_state == State.PassThrough)
         {
             _inner.DisableBuffering();
@@ -107,6 +118,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         switch (_state)
         {
             case State.PassThrough:
+                FlushHeld();
                 _inner.Stream.Write(buffer);
                 break;
             case State.Holding:
@@ -131,6 +143,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         switch (_state)
         {
             case State.PassThrough:
+                await FlushHeldAsync(cancellationToken);
                 await _inner.Stream.WriteAsync(buffer, cancellationToken);
                 break;
             case State.Holding:
@@ -149,12 +162,19 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     {
         if (_state == State.PassThrough)
         {
+            FlushHeld();
             _inner.Stream.Flush();
         }
     }
 
-    public override Task FlushAsync(CancellationToken cancellationToken) =>
-        _state == State.PassThrough ? _inner.Stream.FlushAsync(cancellationToken) : Task.CompletedTask;
+    public override async Task FlushAsync(CancellationToken cancellationToken)
+    {
+        if (_state == State.PassThrough)
+        {
+            await FlushHeldAsync(cancellationToken);
+            await _inner.Stream.FlushAsync(cancellationToken);
+        }
+    }
 
     public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 
@@ -165,6 +185,12 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     /// <summary>Called by the middleware after the application returned: runs pending phases and sends held bytes.</summary>
     public async Task FinishAsync()
     {
+        // Bytes the application wrote to BodyWriter (GetSpan/Advance) without flushing are still in the pipe.
+        if (_writer is not null)
+        {
+            await _writer.FlushAsync(_context.RequestAborted);
+        }
+
         BeginResponse();
         if (_state == State.Holding)
         {
@@ -260,6 +286,15 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         }
 
         return ReadOnlyMemory<byte>.Empty;
+    }
+
+    private void FlushHeld()
+    {
+        if (_held.Length > 0)
+        {
+            _inner.Stream.Write(_held.GetBuffer().AsSpan(0, (int)_held.Length));
+            _held.SetLength(0);
+        }
     }
 
     private async Task FlushHeldAsync(CancellationToken cancellationToken)

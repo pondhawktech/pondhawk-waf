@@ -49,6 +49,13 @@ public sealed class WafOptions
     /// <summary>Most arguments per request; more are rejected with 400. Null: from the profile.</summary>
     public int? ArgumentsLimit { get; set; }
 
+    /// <summary>
+    /// Largest request body without files (URL-encoded, JSON, XML, and the form fields of a multipart body); larger
+    /// bodies are rejected with 413. Every rule runs over these bytes, so this limit bounds the CPU time of one request.
+    /// Null: from the profile.
+    /// </summary>
+    public long? RequestBodyNoFilesLimit { get; set; }
+
     /// <summary>Returns the effective settings: the profile with the options above applied. Validates them.</summary>
     public WafSettings Resolve()
     {
@@ -63,7 +70,8 @@ public sealed class WafOptions
             ResponseMimeTypes ?? p.ResponseMimeTypes,
             ResponseBodyLimit ?? p.ResponseBodyLimit,
             RequestBodyLimit ?? p.RequestBodyLimit,
-            ArgumentsLimit ?? p.ArgumentsLimit);
+            ArgumentsLimit ?? p.ArgumentsLimit,
+            RequestBodyNoFilesLimit ?? p.RequestBodyNoFilesLimit);
         settings.Validate();
         return settings;
     }

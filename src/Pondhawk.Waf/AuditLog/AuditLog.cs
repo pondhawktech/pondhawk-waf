@@ -40,7 +40,7 @@ public sealed record AuditLogEntry(
                     headers[name] = values;
                 }
 
-                ((List<string>)values).Add(RedactedHeaders.Contains(name) ? "[redacted]" : ByteString.ToDisplay(kv.Value));
+                ((List<string>)values).Add(LogRedaction.IsSensitiveHeader(name) ? LogRedaction.Redacted : ByteString.ToDisplay(kv.Value));
             }
         }
 
@@ -50,7 +50,7 @@ public sealed record AuditLogEntry(
             DateTimeOffset.UtcNow,
             v.RemoteAddr.Value,
             v.RequestMethod.Value,
-            ByteString.ToDisplay(v.RequestUriRaw.Value),
+            ByteString.ToDisplay(LogRedaction.RedactQuery(v.RequestUriRaw.Value)),
             v.RequestProtocol.Value,
             headers,
             int.TryParse(v.ResponseStatus.Value, System.Globalization.CultureInfo.InvariantCulture, out var status) ? status : null,
@@ -58,6 +58,7 @@ public sealed record AuditLogEntry(
             interruption is null ? null : new AuditLogInterruption(interruption.RuleId, interruption.Action, interruption.Status, tx.IsInterrupted),
             tx.MatchedRules
                 .Where(m => m.Rule.Log || m.Rule.Audit)
+                .Take(MaxMessages)
                 .Select(m => new AuditLogMessage(
                     m.Rule.LogId,
                     ByteString.ToDisplay(m.Message),
@@ -70,11 +71,15 @@ public sealed record AuditLogEntry(
                 .ToList());
     }
 
-    /// <summary>Request headers whose values never go to the audit log (credentials and session tokens).</summary>
-    public static readonly HashSet<string> RedactedHeaders = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Authorization", "Proxy-Authorization", "Cookie", "X-Api-Key", "X-Auth-Token", "X-Csrf-Token", "X-Xsrf-Token",
-    };
+    /// <summary>Most rule messages in one entry. Each message holds at most 512 bytes of data.</summary>
+    public const int MaxMessages = 200;
+
+    /// <summary>
+    /// Request headers whose values never go to the audit log (credentials and session tokens). The same set as
+    /// <see cref="LogRedaction.SensitiveHeaders"/>; names containing a <see cref="LogRedaction.SensitiveNameParts"/>
+    /// entry are redacted too.
+    /// </summary>
+    public static HashSet<string> RedactedHeaders => LogRedaction.SensitiveHeaders;
 
     public string ToJson() => JsonSerializer.Serialize(this, AuditLogJsonContext.Default.AuditLogEntry);
 }

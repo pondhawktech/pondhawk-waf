@@ -31,6 +31,8 @@ internal static class Multipart
         var text = ByteString.FromBytes(body);
         var dashBoundary = "--" + boundary;
         long totalSize = 0;
+        long fieldSize = 0;
+        var parts = 0;
 
         // Skip the preamble: find the first boundary line.
         var pos = FindBoundaryLine(text, dashBoundary, 0, first: true);
@@ -40,81 +42,183 @@ internal static class Multipart
             throw new BodyProcessorException("multipart: NextPart: EOF");
         }
 
-        while (true)
+        // ASP.NET Core's MultipartReader takes the first "--boundary" anywhere in the preamble, even mid-line, and
+        // later delimiters only after CRLF. Go's mime/multipart (and Coraza) take a boundary after a bare LF and
+        // ignore one mid-line. Every place where the two parsers would split the body differently is a strict error,
+        // so a part the WAF did not see as a form field is never delivered to the application as one.
+        var delimiters = new List<int> { pos };
+        if (text.IndexOf(dashBoundary, StringComparison.Ordinal) != pos)
         {
-            // pos is at the start of "--boundary".
-            var afterBoundary = pos + dashBoundary.Length;
-            if (string.CompareOrdinal(text, afterBoundary, "--", 0, 2) == 0)
+            v.MultipartStrictError.Set("1");
+        }
+
+        try
+        {
+            while (true)
             {
-                // Final boundary. Anything after it is epilogue.
-                var rest = text[(afterBoundary + 2)..].Trim('\r', '\n', ' ', '\t');
-                if (rest.Length > 0)
+                // pos is at the start of "--boundary".
+                var afterBoundary = pos + dashBoundary.Length;
+                if (string.CompareOrdinal(text, afterBoundary, "--", 0, 2) == 0)
                 {
-                    v.MultipartDataAfter.Set("1");
+                    // Final boundary: only CRLF or the end of the body may follow; ASP.NET Core keeps reading parts
+                    // after "--boundary--x".
+                    var afterFinal = afterBoundary + 2;
+                    if (afterFinal < text.Length && string.CompareOrdinal(text, afterFinal, "\r\n", 0, 2) != 0)
+                    {
+                        v.MultipartStrictError.Set("1");
+                    }
+
+                    var rest = text[afterFinal..].Trim('\r', '\n', ' ', '\t');
+                    if (rest.Length > 0)
+                    {
+                        v.MultipartDataAfter.Set("1");
+                    }
+
+                    return;
                 }
 
-                return;
-            }
-
-            var lineEnd = text.IndexOf('\n', afterBoundary);
-            if (lineEnd < 0)
-            {
-                FlagUnexpectedEof(v);
-                return;
-            }
-
-            // Only optional linear whitespace may follow the boundary on its line.
-            if (text.AsSpan(afterBoundary, lineEnd - afterBoundary).TrimEnd('\r').Trim(" \t").Length != 0)
-            {
-                v.MultipartStrictError.Set("1");
-                throw new BodyProcessorException("multipart: boundary followed by data");
-            }
-
-            var headersStart = lineEnd + 1;
-            var headersEnd = FindHeadersEnd(text, headersStart, out var bodyStart);
-            if (headersEnd < 0)
-            {
-                FlagUnexpectedEof(v);
-                return;
-            }
-
-            var headers = ParseHeaders(text[headersStart..headersEnd], out var malformedHeaders);
-            var next = FindBoundaryLine(text, dashBoundary, bodyStart, first: false);
-            string content;
-            var truncated = false;
-            if (next < 0)
-            {
-                content = text[bodyStart..];
-                truncated = true;
-            }
-            else
-            {
-                // The CRLF before the boundary belongs to the delimiter.
-                var end = next;
-                if (end > bodyStart && text[end - 1] == '\n')
+                var lineEnd = text.IndexOf('\n', afterBoundary);
+                if (lineEnd < 0)
                 {
-                    end--;
-                    if (end > bodyStart && text[end - 1] == '\r')
+                    FlagUnexpectedEof(v);
+                    return;
+                }
+
+                // Only optional linear whitespace may follow the boundary on its line.
+                if (text.AsSpan(afterBoundary, lineEnd - afterBoundary).TrimEnd('\r').Trim(" \t").Length != 0)
+                {
+                    v.MultipartStrictError.Set("1");
+                    throw new BodyProcessorException("multipart: boundary followed by data");
+                }
+
+                if (lineEnd == afterBoundary || text[lineEnd - 1] != '\r')
+                {
+                    // A bare LF ends the boundary line.
+                    v.MultipartStrictError.Set("1");
+                }
+
+                parts++;
+                if (options.ArgumentsLimit > 0 && parts > options.ArgumentsLimit)
+                {
+                    // Parts with files count too: their number is not otherwise bounded.
+                    v.ArgumentsLimitReached.Set("1");
+                    return;
+                }
+
+                var headersStart = lineEnd + 1;
+                var next = FindBoundaryLine(text, dashBoundary, headersStart, first: false);
+                var partEnd = next < 0 ? text.Length : next;
+                var headersEnd = FindHeadersEnd(text, headersStart, partEnd, out var bodyStart);
+                if (headersEnd < 0)
+                {
+                    if (next >= 0)
+                    {
+                        v.MultipartStrictError.Set("1");
+                        throw new BodyProcessorException("multipart: part headers not terminated");
+                    }
+
+                    FlagUnexpectedEof(v);
+                    return;
+                }
+
+                if (HasBareLineFeed(text, headersStart, bodyStart))
+                {
+                    v.MultipartStrictError.Set("1");
+                }
+
+                var headers = ParseHeaders(text[headersStart..headersEnd], out var malformedHeaders);
+                string content;
+                var truncated = false;
+                if (next < 0)
+                {
+                    content = text[bodyStart..];
+                    truncated = true;
+                }
+                else
+                {
+                    // The CRLF before the boundary belongs to the delimiter.
+                    var end = next;
+                    if (end > bodyStart && text[end - 1] == '\n')
                     {
                         end--;
+                        if (end > bodyStart && text[end - 1] == '\r')
+                        {
+                            end--;
+                        }
+                        else
+                        {
+                            // A delimiter after a bare LF: part content to ASP.NET Core, a new part to Go.
+                            v.MultipartStrictError.Set("1");
+                        }
+                    }
+
+                    content = text[bodyStart..Math.Max(bodyStart, end)];
+                    delimiters.Add(next);
+                }
+
+                if (ProcessPart(tx, headers, malformedHeaders, content, ref totalSize))
+                {
+                    fieldSize += content.Length;
+                    if (options.NoFilesLimit > 0 && fieldSize > options.NoFilesLimit)
+                    {
+                        v.InboundDataError.Set("1");
+                        throw new BodyProcessorException("multipart: form fields exceed SecRequestBodyNoFilesLimit");
                     }
                 }
 
-                content = text[bodyStart..Math.Max(bodyStart, end)];
-            }
+                if (truncated)
+                {
+                    FlagUnexpectedEof(v);
+                    return;
+                }
 
-            ProcessPart(tx, headers, malformedHeaders, content, ref totalSize);
-            if (truncated)
-            {
-                FlagUnexpectedEof(v);
-                return;
+                pos = next;
             }
-
-            pos = next;
+        }
+        finally
+        {
+            CheckStrayBoundaries(text, dashBoundary, delimiters, v);
         }
     }
 
-    private static void ProcessPart(Transaction tx, List<KeyValuePair<string, string>> headers, bool malformedHeaders, string content, ref long totalSize)
+    // A "--boundary" that is not a delimiter the WAF used (mid-line, or followed by other characters) is a delimiter
+    // to some other multipart parser.
+    private static void CheckStrayBoundaries(string text, string dashBoundary, List<int> delimiters, Collections.TransactionVariables v)
+    {
+        var last = delimiters[^1];
+        var used = 0;
+        var i = text.IndexOf(dashBoundary, StringComparison.Ordinal);
+        while (i >= 0 && i <= last)
+        {
+            if (used < delimiters.Count && delimiters[used] == i)
+            {
+                used++;
+            }
+            else
+            {
+                v.MultipartStrictError.Set("1");
+                return;
+            }
+
+            i = text.IndexOf(dashBoundary, i + 1, StringComparison.Ordinal);
+        }
+    }
+
+    private static bool HasBareLineFeed(string text, int start, int end)
+    {
+        for (var i = text.IndexOf('\n', start, end - start); i >= 0; i = i + 1 < end ? text.IndexOf('\n', i + 1, end - i - 1) : -1)
+        {
+            if (i == 0 || text[i - 1] != '\r')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Returns true when the part is a form field (no file name).
+    private static bool ProcessPart(Transaction tx, List<KeyValuePair<string, string>> headers, bool malformedHeaders, string content, ref long totalSize)
     {
         var v = tx.Variables;
         var disposition = headers.FirstOrDefault(h => h.Key == "Content-Disposition").Value ?? string.Empty;
@@ -181,13 +285,13 @@ internal static class Multipart
             }
 
             v.FilesNames.Add(string.Empty, partName);
-        }
-        else
-        {
-            tx.AddPostRequestArgument(partName, content);
+            v.FilesCombinedSize.Set(totalSize.ToString(CultureInfo.InvariantCulture));
+            return false;
         }
 
+        tx.AddPostRequestArgument(partName, content);
         v.FilesCombinedSize.Set(totalSize.ToString(CultureInfo.InvariantCulture));
+        return true;
     }
 
     private static void FlagUnexpectedEof(Collections.TransactionVariables v)
@@ -223,7 +327,9 @@ internal static class Multipart
         }
     }
 
-    private static int FindHeadersEnd(string text, int start, out int bodyStart)
+    // Finds the blank line that ends the part headers, searching only up to the next delimiter (searching the whole
+    // rest of the body for every part is quadratic).
+    private static int FindHeadersEnd(string text, int start, int limit, out int bodyStart)
     {
         // An empty header block: the body starts right after a blank line.
         if (string.CompareOrdinal(text, start, "\r\n", 0, 2) == 0)
@@ -238,8 +344,9 @@ internal static class Multipart
             return start;
         }
 
-        var crlf = text.IndexOf("\r\n\r\n", start, StringComparison.Ordinal);
-        var lf = text.IndexOf("\n\n", start, StringComparison.Ordinal);
+        var count = Math.Max(0, limit - start);
+        var crlf = text.IndexOf("\r\n\r\n", start, count, StringComparison.Ordinal);
+        var lf = text.IndexOf("\n\n", start, count, StringComparison.Ordinal);
         if (crlf >= 0 && (lf < 0 || crlf < lf))
         {
             bodyStart = crlf + 4;

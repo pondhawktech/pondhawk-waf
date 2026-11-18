@@ -16,6 +16,13 @@ public sealed class WafConfig
     /// <summary>Maximum request body size in bytes (SecRequestBodyLimit). Default 13 MiB, as Coraza recommends.</summary>
     public long RequestBodyLimit { get; set; } = 13_107_200;
 
+    /// <summary>
+    /// Maximum size in bytes of a request body without files (SecRequestBodyNoFilesLimit): URL-encoded, JSON, XML and
+    /// raw bodies, and the form fields of a multipart body. Every rule runs over these bytes, so they cost far more to
+    /// inspect than file content. 0 means only <see cref="RequestBodyLimit"/> applies.
+    /// </summary>
+    public long RequestBodyNoFilesLimit { get; set; } = 1_048_576;
+
     /// <summary>Bytes kept in memory before the body spills to a temporary file.</summary>
     public long RequestBodyInMemoryLimit { get; set; } = 131_072;
 
@@ -64,6 +71,16 @@ public sealed class WafEngine
     }
 
     public WafConfig Config { get; }
+
+    private long _logFailures;
+
+    /// <summary>
+    /// Times the error callback threw. Rule matching ignores these failures so that a broken log sink does not fail
+    /// requests; monitor this count instead.
+    /// </summary>
+    public long LogFailures => Interlocked.Read(ref _logFailures);
+
+    internal void RecordLogFailure() => Interlocked.Increment(ref _logFailures);
 
     /// <summary>Top-level rules in evaluation order (chain links hang off <see cref="Rule.Chain"/>).</summary>
     public IReadOnlyList<Rule> Rules => _rules;

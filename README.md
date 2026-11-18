@@ -22,12 +22,24 @@ CRS at paranoia level 1, on the query string, path, headers, cookies, and form, 
 | Data leakage in responses: SQL errors, stack traces, PHP/Java/IIS/Ruby errors, directory listings | 950xxx-956xxx |
 | Web shells in responses | 955xxx |
 
-The base configuration also rejects bodies that cannot be parsed, strict multipart errors, more than 1,000
-arguments, and bodies over 13 MiB (413).
+The base configuration also rejects bodies that cannot be parsed, multipart bodies that other parsers (ASP.NET Core's
+`MultipartReader`) would split differently, more than 1,000 arguments or parts, bodies without files over 1 MiB and
+bodies with files over 13 MiB (413).
 
 Responses of type `text/html`, `text/plain`, `text/xml`, `application/json` and `application/problem+json` are held
-in memory (up to 512 KiB) and inspected before the client receives any byte. A match replaces the response with an
-empty 403. Other responses stream through unchanged; larger responses are inspected on their first 512 KiB.
+in memory (up to 512 KiB) and inspected before the client receives any byte. Equivalent types are inspected too: every
+`*/json` and `*+json` type (`text/json`, `application/vnd.api+json`), every `*/xml` and `*+xml` type, and responses
+without `Content-Type`. UTF-16 and UTF-32 bodies are transcoded to UTF-8 for inspection. A match replaces the response
+with an empty 403. Other responses stream through unchanged; larger responses are inspected on their first 512 KiB.
+
+### What is not inspected
+
+- **The rest of a large body.** Responses are inspected on their first `ResponseBodyLimit` bytes.
+- **Streaming responses.** A response that calls `DisableBuffering()` (server-sent events, streamed JSON) is
+  inspected on what it wrote before that call, then streams through.
+- **Compressed responses.** Place response compression outside (before) the WAF.
+- **Upgraded connections.** WebSocket data after the 101 response is not inspected.
+- **File content in multipart uploads**, as in CRS. File names and sizes are inspected.
 
 ## Quick start
 
@@ -76,6 +88,7 @@ A profile pre-selects the security/performance settings. Any option set explicit
 | Response inspection | off | text, JSON | text, JSON, XML | text, JSON, XML |
 | Response bytes inspected | — | 512 KiB | 1 MiB | 1 MiB |
 | Request body limit | 13 MiB | 13 MiB | 8 MiB | 4 MiB |
+| Request body limit without files | 1 MiB | 1 MiB | 512 KiB | 128 KiB |
 | Arguments limit | 1000 | 1000 | 500 | 255 |
 | Over-limit request body | 413 | 413 | 413 | 413 |
 | Time per request (see below) | 0.6 ms | 1.2 ms | 1.5 ms | 1.4 ms |
@@ -113,12 +126,13 @@ combination, e.g. a detection level lower than the blocking level.
 | `ResponseMimeTypes` | profile | Response MIME types held and inspected |
 | `ResponseBodyLimit` | profile | Response bytes held and inspected |
 | `RequestBodyLimit` | profile | Largest request body (413 above) |
+| `RequestBodyNoFilesLimit` | profile | Largest body without files: URL-encoded, JSON, XML, multipart form fields (413 above). Bounds the CPU time of one request |
 | `ArgumentsLimit` | profile | Most arguments per request (400 above) |
 | `Directives` | none | SecLang loaded after the profile settings, before the CRS rules |
 | `DirectivesAfterRules` | none | SecLang loaded after the CRS rules |
 | `RuleFiles` | none | SecLang files from disk, loaded last |
 | `Bypass` | none | Predicate for requests that skip the WAF |
-| `UseCoreRuleSet` | true | Load the embedded CRS |
+| `UseCoreRuleSet` | true | Load the embedded CRS. The base configuration (body processing, limits) loads either way |
 | `WarmUp` | true | Pre-build regex automata at startup |
 
 Load order: base configuration → CRS setup → profile settings → `Directives` → CRS rules → `DirectivesAfterRules`
@@ -149,11 +163,28 @@ Use ids 10000-99999 for your own rules.
 | Category | Level | Content |
 |---|---|---|
 | `Pondhawk.Waf.Rules` | Warning | One ModSecurity-style line per matched rule |
-| `Pondhawk.Waf.Audit` | Information | One JSON entry per relevant transaction (blocked or 4xx/5xx) |
+| `Pondhawk.Waf.Audit` | Information | One JSON entry per relevant transaction: a rule matched, the WAF blocked, or a 5xx |
 | `Pondhawk.Waf.AspNetCore.WafMiddleware` | Warning | One line per blocked request |
+| `Pondhawk.Waf` | Information, Warning | Effective settings at startup; a warning when the rule engine is not `On` |
 
-The audit log redacts `Authorization`, `Cookie` and other credential headers. Rule log lines contain the matched
-data, which can include parts of the request.
+What the logs contain:
+
+- **Matched data, truncated.** Rule log lines and audit entries hold the matched data (logdata), cut at 512 bytes.
+  An audit entry holds at most 200 messages.
+- **No credentials.** Values are redacted (`[redacted]`) for cookies, credential headers (`Authorization`, `Cookie`,
+  `Set-Cookie`, `X-Api-Key` and any name containing `token`, `secret`, `auth`, `session`, `api-key`...), and arguments
+  whose names contain `pass`, `pwd`, `secret`, `token`, `auth` and similar (`LogRedaction.SensitiveNameParts`). Query
+  parameters with such names are redacted in logged URIs. Other matched values are logged: they are the attack.
+- **Control characters escaped**, including C1 controls and Unicode line breaks, so a request cannot forge log lines.
+
+A log provider that throws does not fail requests; `WafEngine.LogFailures` counts the failures.
+
+### Failure behavior
+
+- **Configuration errors** (invalid profile values, bad directives, missing rule files) fail startup.
+- **Engine errors** during a request propagate as exceptions: the request fails (500) instead of reaching the
+  application uninspected.
+- **Unparsable bodies** are rejected with 400 (`REQBODY_ERROR`, rule 200002), including invalid JSON strings.
 
 ## Projects
 
@@ -190,6 +221,9 @@ Measured in-process on the development machine (Release, full CRS, paranoia leve
 
 - Startup: about 3.5 s to load and compile CRS (668 rules), plus warm-up.
 - Per request: about 1.2 ms for a typical form POST; about 1.6 ms with a 10 KB HTML response inspected.
+- Worst case: a body without files at the 1 MiB limit costs about 0.5-0.8 s of CPU and 150-250 MiB of allocation
+  (every rule runs over every byte). Lower `RequestBodyNoFilesLimit` if your API does not need large bodies, and
+  rate-limit clients in front of the WAF.
 
 ## License
 

@@ -35,7 +35,17 @@ public static class WafServiceCollectionExtensions
     public static IApplicationBuilder UsePondhawkWaf(this IApplicationBuilder app)
     {
         // Build the engine now so configuration errors fail startup, not the first request.
-        _ = app.ApplicationServices.GetRequiredService<WafEngine>();
+        var waf = app.ApplicationServices.GetRequiredService<WafEngine>();
+        var options = app.ApplicationServices.GetRequiredService<IOptions<WafOptions>>().Value;
+        var logger = app.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger("Pondhawk.Waf");
+        var s = options.Resolve();
+        WafLog.Started(logger, waf.Config.RuleEngine, options.Profile, s.ParanoiaLevel, s.DetectionParanoiaLevel,
+            s.InboundAnomalyScoreThreshold, s.InspectResponses, waf.Rules.Count);
+        if (waf.Config.RuleEngine != RuleEngineMode.On)
+        {
+            WafLog.NotBlocking(logger, waf.Config.RuleEngine);
+        }
+
         return app.UseMiddleware<WafMiddleware>();
     }
 
@@ -55,6 +65,7 @@ public static class WafServiceCollectionExtensions
         }
 
         sb.AppendLine(string.Create(ci, $"SecRequestBodyLimit {s.RequestBodyLimit}"));
+        sb.AppendLine(string.Create(ci, $"SecRequestBodyNoFilesLimit {s.RequestBodyNoFilesLimit}"));
         sb.AppendLine(string.Create(ci, $"SecArgumentsLimit {s.ArgumentsLimit}"));
         sb.AppendLine(s.InspectResponses ? "SecResponseBodyAccess On" : "SecResponseBodyAccess Off");
         sb.AppendLine("SecResponseBodyMimeTypesClear");
@@ -76,10 +87,9 @@ public static class WafServiceCollectionExtensions
         builder.Config.ErrorCallback = matched => WafLog.RuleMatched(errorLog, matched.ErrorLogLine());
         builder.Config.AuditLogWriter = new LoggerAuditLogWriter(auditLog);
 
-        if (options.UseCoreRuleSet)
-        {
-            builder.AddDirectives(CoreRuleSetFiles.BaseDirectives);
-        }
+        // The base configuration (body access and processors, limits, the deny rules for unparsable bodies) applies
+        // with or without CRS: without it, request bodies would not be inspected or limited at all.
+        builder.AddDirectives(options.UseCoreRuleSet ? CoreRuleSetFiles.BaseDirectives : CoreRuleSetFiles.EngineDirectives);
 
         var settings = options.Resolve();
         builder.AddDirectives(SettingsDirectives(settings, options.UseCoreRuleSet));
@@ -146,4 +156,10 @@ internal static partial class WafLog
 
     [LoggerMessage(EventId = 11, Level = LogLevel.Information, Message = "{Entry}")]
     public static partial void Audit(ILogger logger, string entry);
+
+    [LoggerMessage(EventId = 12, Level = LogLevel.Information, Message = "Pondhawk WAF started: rule engine {RuleEngine}, profile {Profile}, paranoia level {ParanoiaLevel} (detection {DetectionParanoiaLevel}), inbound threshold {InboundThreshold}, response inspection {InspectResponses}, {RuleCount} rules")]
+    public static partial void Started(ILogger logger, RuleEngineMode ruleEngine, WafProfile profile, int paranoiaLevel, int detectionParanoiaLevel, int inboundThreshold, bool inspectResponses, int ruleCount);
+
+    [LoggerMessage(EventId = 13, Level = LogLevel.Warning, Message = "Pondhawk WAF rule engine is {RuleEngine}: requests are inspected and logged but NOT blocked. Set WafOptions.RuleEngine = RuleEngineMode.On to block.")]
+    public static partial void NotBlocking(ILogger logger, RuleEngineMode ruleEngine);
 }

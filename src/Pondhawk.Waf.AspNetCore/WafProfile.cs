@@ -39,7 +39,9 @@ public enum WafProfile
 /// <param name="ResponseBodyLimit">Response bytes held and inspected; larger responses are inspected partially.</param>
 /// <param name="RequestBodyLimit">Largest request body; larger bodies are rejected with 413.</param>
 /// <param name="ArgumentsLimit">Most arguments per request; more are rejected with 400.</param>
-public sealed record WafSettings(
+/// <param name="RequestBodyNoFilesLimit">Largest request body without files (URL-encoded, JSON, XML, multipart form
+/// fields); larger bodies are rejected with 413. Bounds the inspection cost of one request.</param>
+public sealed partial record WafSettings(
     int ParanoiaLevel,
     int DetectionParanoiaLevel,
     int InboundAnomalyScoreThreshold,
@@ -48,7 +50,8 @@ public sealed record WafSettings(
     IReadOnlyList<string> ResponseMimeTypes,
     long ResponseBodyLimit,
     long RequestBodyLimit,
-    int ArgumentsLimit)
+    int ArgumentsLimit,
+    long RequestBodyNoFilesLimit)
 {
     private static readonly string[] TextAndJson =
         ["text/plain", "text/html", "text/xml", "application/json", "application/problem+json"];
@@ -59,10 +62,10 @@ public sealed record WafSettings(
     /// <summary>The settings of a profile.</summary>
     public static WafSettings For(WafProfile profile) => profile switch
     {
-        WafProfile.Performance => new(1, 1, 5, 4, false, TextAndJson, 524_288, 13_107_200, 1000),
-        WafProfile.Balanced => new(1, 2, 5, 4, true, TextAndJson, 524_288, 13_107_200, 1000),
-        WafProfile.Strict => new(2, 3, 5, 4, true, TextJsonAndXml, 1_048_576, 8_388_608, 500),
-        WafProfile.Paranoid => new(3, 4, 3, 3, true, TextJsonAndXml, 1_048_576, 4_194_304, 255),
+        WafProfile.Performance => new(1, 1, 5, 4, false, TextAndJson, 524_288, 13_107_200, 1000, 1_048_576),
+        WafProfile.Balanced => new(1, 2, 5, 4, true, TextAndJson, 524_288, 13_107_200, 1000, 1_048_576),
+        WafProfile.Strict => new(2, 3, 5, 4, true, TextJsonAndXml, 1_048_576, 8_388_608, 500, 524_288),
+        WafProfile.Paranoid => new(3, 4, 3, 3, true, TextJsonAndXml, 1_048_576, 4_194_304, 255, 131_072),
         _ => throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unknown WAF profile."),
     };
 
@@ -85,7 +88,7 @@ public sealed record WafSettings(
             throw new ArgumentOutOfRangeException(nameof(InboundAnomalyScoreThreshold), "Anomaly score thresholds must be at least 1.");
         }
 
-        if (ResponseBodyLimit < 1 || RequestBodyLimit < 1 || ArgumentsLimit < 1)
+        if (ResponseBodyLimit < 1 || RequestBodyLimit < 1 || ArgumentsLimit < 1 || RequestBodyNoFilesLimit < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(RequestBodyLimit), "Limits must be at least 1.");
         }
@@ -97,10 +100,15 @@ public sealed record WafSettings(
 
         foreach (var type in ResponseMimeTypes)
         {
-            if (string.IsNullOrWhiteSpace(type) || type.Any(char.IsWhiteSpace))
+            // The values are written into SecLang directives: allow RFC 6838 type/subtype tokens only, so a value
+            // cannot carry a quote, a line continuation or another directive.
+            if (type is null || !MimeTypePattern().IsMatch(type))
             {
-                throw new ArgumentException($"Invalid response MIME type '{type}'.", nameof(ResponseMimeTypes));
+                throw new ArgumentException($"Invalid response MIME type '{type}'. Use type/subtype, e.g. application/json.", nameof(ResponseMimeTypes));
             }
         }
     }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$")]
+    private static partial System.Text.RegularExpressions.Regex MimeTypePattern();
 }

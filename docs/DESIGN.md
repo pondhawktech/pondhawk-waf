@@ -45,7 +45,10 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
   timeout.
 - **RE2 → .NET translation** (`RegexCache.TranslatePattern`): `\x{HH}`, `(?P<name>`, escaped punctuation as a range
   start inside a class (`[\--9]`, which .NET silently misreads; before the fix 11 CRS RCE regression tests failed),
-  and a bare `[` inside a class (.NET class subtraction).
+  and a bare `[` inside a class (.NET class subtraction). `\w`, `\W`, `\d`, `\D`, `\s`, `\S` become explicit
+  ASCII classes, as in RE2: .NET's Unicode classes would count byte-string chars 0x80-0xFF as letters and spaces, so
+  `%C2%AAeval(` hid `eval` from CRS. .NET has no ASCII-only `\b`, so patterns with `\b`/`\B` match input whose bytes
+  0x80-0xFF are moved to U+E080-U+E0FF (private use, not word characters); the pattern's byte escapes move with them.
 - **Default `(?sm)`** on `@rx`, as Coraza's default build.
 - **XML** uses `XmlReader` with DTD processing ignored and no resolver (no XXE, no entity expansion). A parse error
   sets `REQBODY_ERROR`; the base configuration rejects it (rule 200002).
@@ -59,8 +62,10 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
 
 | Area | Coraza | Pondhawk |
 |---|---|---|
-| Regex `\w`, `\b`, `\s`, `\d` | ASCII (RE2) | .NET classes; with byte strings this adds Latin-1 letters (0xC0-0xFF) to `\w`, `\v` to `\s` |
-| Regex `.` on UTF-8 | one rune | one byte |
+| Regex `.` and counted repeats (`.{1,10}`, `[^=]{1,10}`) on UTF-8 | one rune | one byte: a repeat bound matches fewer characters of non-ASCII text |
+| Multipart | Go `mime/multipart`: delimiters after a bare LF | strict error (400) wherever Go and ASP.NET Core's `MultipartReader` would split the body differently |
+| JSON | flattens any document | rejects key paths totalling more than 4 × the body size, and invalid strings (lone surrogates, invalid UTF-8) |
+| Response MIME types | exact match | `*/json`, `*+json`, `*/xml`, `*+xml` and missing `Content-Type` match the listed families; UTF-16/32 transcoded |
 | Malformed XML | Go decoder continues non-strictly | parsing stops at the first error, `REQBODY_ERROR` set |
 | Malformed JSON | partial flattening, then error | no flattening, error |
 | Multiphase evaluation | optional build tag | not implemented |
@@ -126,6 +131,22 @@ Ordered by protection value.
 - `WafProfile` (Performance, Balanced, Strict, Paranoid) with `WafSettings`; nullable options override single values.
 - Guard rule 900002 keeps the detection paranoia level at or above the blocking level (CRS 901500 would otherwise
   deny every request with 500).
+
+### Security hardening (done)
+
+An adversarial review (four reviewers: middleware, body parsing, rule engine, configuration and logging) found
+3 critical, 4 high and 11 medium issues. All are fixed, each with a regression test in `SecurityHardeningTests`:
+
+- A body filling the limit exactly let the tail through uninspected; DetectionOnly rejected oversized bodies.
+- Four multipart differentials with ASP.NET Core's `MultipartReader`; quadratic part-header search; unbounded parts.
+- JSON key-path amplification (a 32 KB body cost 2 GB); invalid JSON strings threw instead of setting `REQBODY_ERROR`.
+- Unicode `\w`/`\b`/`\s`/`\d` in translated CRS regexes (a Latin-1 byte before a keyword hid it).
+- Inspection cost: `SecRequestBodyNoFilesLimit` (1 MiB default) and a bounded transformation cache.
+- Response formats the client chooses (`text/json`, `+json`, XML, UTF-16, no `Content-Type`) were not inspected;
+  unflushed `BodyWriter` bytes were lost; streaming responses were held until complete.
+- Logs: unbounded matched data, credentials in logdata and URIs, 4xx-only audit entries, C1/Unicode line breaks,
+  log sink failures failing requests; a startup warning when the engine does not block; MIME type values could inject
+  directives; `UseCoreRuleSet = false` dropped body inspection.
 
 ### Milestone 3: operations
 

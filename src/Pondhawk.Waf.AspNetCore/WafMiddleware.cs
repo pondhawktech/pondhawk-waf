@@ -69,9 +69,20 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngine waf, I
             {
                 tx.ProcessLogging();
             }
-            catch (Exception ex) when (ex is IOException or InvalidOperationException)
+#pragma warning disable CA1031 // A failing audit sink must not turn a served request into an error.
+            catch (Exception ex)
+#pragma warning restore CA1031
             {
-                LogAuditFailure(logger, ex);
+                try
+                {
+                    LogAuditFailure(logger, ex);
+                }
+#pragma warning disable CA1031
+                catch (Exception)
+#pragma warning restore CA1031
+                {
+                    tx.Waf.RecordLogFailure();
+                }
             }
         }
     }

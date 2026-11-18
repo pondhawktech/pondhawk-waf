@@ -91,8 +91,10 @@ public sealed class MatchedRule(
                 case '\\':
                     sb.Append("\\\\");
                     break;
-                case < ' ':
-                    sb.Append("\\x").Append(((int)c).ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
+                // Control characters, C1 controls (0x85 NEL, 0x9B CSI) and Unicode line breaks, which some log viewers
+                // and terminals render as new lines or escape sequences.
+                case < ' ' or (>= '\u007f' and <= '\u009f') or '\u2028' or '\u2029':
+                    sb.Append("\\u").Append(((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
                     break;
                 default:
                     sb.Append(c);
