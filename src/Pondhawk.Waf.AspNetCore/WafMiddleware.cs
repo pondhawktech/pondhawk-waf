@@ -9,8 +9,9 @@ using Pondhawk.Waf.Text;
 namespace Pondhawk.Waf.AspNetCore;
 
 /// <summary>
-/// Runs every request through the WAF: phase 1 (request headers) and phase 2 (request body) before the application,
-/// phases 3-5 after it (detection and logging only in this version).
+/// Runs every request through the WAF: phase 1 (request headers) and phase 2 (request body) before the application;
+/// phase 3 (response headers) and phase 4 (response body) before the response reaches the client; phase 5 (logging)
+/// at the end. A match in any of phases 1-4 replaces the response.
 /// </summary>
 public sealed partial class WafMiddleware(RequestDelegate next, WafEngine waf, IOptions<WafOptions> options, ILogger<WafMiddleware> logger)
 {
@@ -42,8 +43,25 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngine waf, I
                 return;
             }
 
-            await next(context);
-            ProcessResponse(context, tx);
+            // Upgraded connections (WebSocket) bypass the body feature, so the wrapper only sees normal responses.
+            // Do not skip on request headers: a client could send "Connection: Upgrade" to avoid inspection.
+            var inner = context.Features.GetRequiredFeature<IHttpResponseBodyFeature>();
+            using var inspector = new ResponseInspector(context, tx, inner);
+            context.Features.Set<IHttpResponseBodyFeature>(inspector);
+            try
+            {
+                await next(context);
+                await inspector.FinishAsync();
+            }
+            finally
+            {
+                context.Features.Set(inner);
+            }
+
+            if (inspector.Interruption is { } responseInterruption)
+            {
+                await InterruptAsync(context, tx, responseInterruption);
+            }
         }
         finally
         {
@@ -157,23 +175,6 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngine waf, I
         return null;
     }
 
-    private static void ProcessResponse(HttpContext context, Transaction tx)
-    {
-        // Response inspection runs after the application wrote the response: it records matches and feeds the
-        // audit log, but cannot change a response that has started.
-        foreach (var header in context.Response.Headers)
-        {
-            var name = ByteString.FromUtf16(header.Key);
-            foreach (var value in header.Value)
-            {
-                tx.AddResponseHeader(name, ByteString.FromUtf16(value));
-            }
-        }
-
-        tx.ProcessResponseHeaders(context.Response.StatusCode, context.Request.Protocol);
-        tx.ProcessResponseBody();
-    }
-
     private async Task InterruptAsync(HttpContext context, Transaction tx, Interruption interruption)
     {
         LogBlocked(logger, interruption.RuleId, interruption.Action, interruption.Status, tx.Id);
@@ -189,8 +190,10 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngine waf, I
             return;
         }
 
-        context.Response.Clear();
+        // Not context.Response.Clear(): it would also reset the body feature. Nothing has been sent yet.
         context.Response.StatusCode = interruption.Status;
+        context.Response.Headers.Clear();
+        context.Features.Get<IHttpResponseFeature>()!.ReasonPhrase = null;
         tx.Variables.ResponseStatus.Set(interruption.Status.ToString(CultureInfo.InvariantCulture));
         if (interruption.Action == "redirect" && !string.IsNullOrEmpty(interruption.Data))
         {

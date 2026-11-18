@@ -87,10 +87,16 @@ app.Use(async (ctx, next) =>
 app.UsePondhawkWaf();
 app.Run(async ctx =>
 {
-    // Read the body as an application would, then answer like the albedo backend.
+    // Read the body as an application would, then answer like the albedo backend the CRS tests expect.
     using var sink = new MemoryStream();
     await ctx.Request.Body.CopyToAsync(sink);
     ctx.Response.ContentType = "text/plain";
+    if (ctx.Request.Path == "/reflect" && sink.Length > 0)
+    {
+        await ReflectAsync(ctx, sink.ToArray());
+        return;
+    }
+
     await ctx.Response.WriteAsync("ok");
 });
 
@@ -108,7 +114,7 @@ foreach (var (k, val) in LoadOverrides(Path.Combine(baseDir, "kestrel-overrides.
 var files = Directory.GetFiles(Path.Combine(baseDir, "crs-tests"), "*.yaml", SearchOption.AllDirectories).Order(StringComparer.Ordinal).ToList();
 var deserializer = new DeserializerBuilder().Build();
 
-int pass = 0, fail = 0, skipped = 0;
+int pass = 0, fail = 0;
 var failures = new List<string>();
 var byGroup = new SortedDictionary<string, (int Pass, int Fail)>(StringComparer.Ordinal);
 sw.Restart();
@@ -128,13 +134,6 @@ foreach (var file in files)
         var name = $"{ruleId}-{testId}";
         if (filter is not null && (filter.EndsWith('$') ? name != filter[..^1] : !name.Contains(filter, StringComparison.Ordinal) && !group.Contains(filter, StringComparison.Ordinal)))
         {
-            continue;
-        }
-
-        if (group.StartsWith("RESPONSE-", StringComparison.Ordinal))
-        {
-            // Response inspection is not part of milestone 1.
-            skipped++;
             continue;
         }
 
@@ -198,7 +197,7 @@ foreach (var (group, (p, f)) in byGroup)
 }
 
 Console.WriteLine();
-Console.WriteLine($"Total: {pass} pass, {fail} fail, {skipped} skipped (response phase) in {sw.Elapsed.TotalSeconds:F1} s");
+Console.WriteLine($"Total: {pass} pass, {fail} fail in {sw.Elapsed.TotalSeconds:F1} s");
 if (reportPath is not null)
 {
     await File.WriteAllLinesAsync(reportPath, failures);
@@ -342,6 +341,34 @@ static async Task<(int Status, string? Error)> SendAsync(Uri address, byte[] req
     catch (Exception ex) when (ex is IOException or SocketException)
     {
         return (0, ex.GetType().Name);
+    }
+}
+
+// albedo /reflect: the request body is JSON {"status": n, "headers": {..}, "body": "..", "encodedBody": "base64"}.
+static async Task ReflectAsync(HttpContext ctx, byte[] json)
+{
+    using var doc = System.Text.Json.JsonDocument.Parse(json);
+    var root = doc.RootElement;
+    if (root.TryGetProperty("status", out var status) && status.TryGetInt32(out var code))
+    {
+        ctx.Response.StatusCode = code;
+    }
+
+    if (root.TryGetProperty("headers", out var headers) && headers.ValueKind == System.Text.Json.JsonValueKind.Object)
+    {
+        foreach (var h in headers.EnumerateObject())
+        {
+            ctx.Response.Headers[h.Name] = h.Value.ToString();
+        }
+    }
+
+    if (root.TryGetProperty("encodedBody", out var encoded) && encoded.GetString() is { Length: > 0 } b64)
+    {
+        await ctx.Response.Body.WriteAsync(Convert.FromBase64String(b64));
+    }
+    else if (root.TryGetProperty("body", out var body) && body.GetString() is { } text)
+    {
+        await ctx.Response.WriteAsync(text);
     }
 }
 

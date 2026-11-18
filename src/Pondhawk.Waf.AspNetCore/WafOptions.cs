@@ -19,6 +19,15 @@ public sealed class WafOptions
     /// <summary>CRS inbound anomaly score threshold (tx.inbound_anomaly_score_threshold). Default 5: one critical match blocks.</summary>
     public int InboundAnomalyScoreThreshold { get; set; } = 5;
 
+    /// <summary>CRS outbound anomaly score threshold (tx.outbound_anomaly_score_threshold). Default 4: one error-level leak blocks.</summary>
+    public int OutboundAnomalyScoreThreshold { get; set; } = 4;
+
+    /// <summary>
+    /// Inspect response bodies (SecResponseBodyAccess). Text responses (text/html, text/plain, text/xml) are held in
+    /// memory up to 512 KiB before they are sent. Default true.
+    /// </summary>
+    public bool InspectResponses { get; set; } = true;
+
     /// <summary>SecLang loaded after the CRS setup and before the CRS rules: SecAction tuning, ctl-based exclusions.</summary>
     public string? Directives { get; set; }
 

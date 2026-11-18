@@ -71,13 +71,34 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
 Server-level differences from Apache (the CRS reference) are listed with reasons in
 `tests/Pondhawk.Waf.CrsRegression/kestrel-overrides.yaml`.
 
+### Response inspection
+
+`ResponseInspector` replaces `IHttpResponseBodyFeature` for the request.
+
+- Phase 3 runs when the application starts the response (first write, `StartAsync`, `CompleteAsync`, or return).
+- Inspected bodies (MIME type listed, no `Content-Encoding`, not HEAD/204/304) are held in memory. Phase 4 runs
+  when the application returns; held bytes are sent only if no rule interrupts.
+- Over `SecResponseBodyLimit`: `ProcessPartial` runs phase 4 on the first bytes, then streams the rest;
+  `Reject` answers 500.
+- Other bodies run phase 4 without a body before the first byte is sent, then stream through.
+- A block clears status, headers and body, and sends an empty response with the rule's status.
+- No bypass on request headers: a client can send `Connection: Upgrade`, so upgrade requests are wrapped too.
+  Real upgrades (WebSocket) do not use the body feature.
+- JSON is inspected by default (Coraza and CRS list only text types), because ASP.NET Core applications mostly
+  answer in JSON.
+
 ## Limits
 
-- Response inspection (phases 3-4) runs after the application has written the response: it records matches and
-  feeds the audit log, but cannot block. CRS RESPONSE-95x data-leakage rules do not run (response body access is off).
+- Inspected responses are buffered: a streamed text or JSON response (e.g. flushed progressively) reaches the
+  client only when the application returns, or after the first 512 KiB. Server-sent events (`text/event-stream`)
+  are not inspected and stream normally.
+- Headers added by `Response.OnStarting` callbacks run after phase 3 and are not inspected.
+- Responses compressed by the application are not inspected; put response compression outside the WAF.
+- Response bodies over 512 KiB are inspected on their first 512 KiB only.
 - One `WafEngine` per application; rule changes need a restart.
 - Startup takes about 3.5 s with the full CRS. The first request after startup is warmed up.
-- Per-request cost is about 1.2 ms for a typical request with the full CRS at paranoia level 1.
+- Per-request cost is about 1.2 ms for a typical request with the full CRS at paranoia level 1, about 1.6 ms with
+  a 10 KB HTML response inspected.
 
 ## Roadmap
 
@@ -92,12 +113,13 @@ Ordered by protection value.
 - Body processors: URLENCODED, MULTIPART (strict checks), JSON, XML, RAW.
 - libinjection port; body limits; argument limits; audit and rule logs; middleware; CRS regression runner.
 
-### Milestone 2: response protection
+### Milestone 2 (done): response protection
 
-1. Buffer the response body (allowed MIME types, size limit) and run phases 3-4 before the response starts, so
-   `RESPONSE-95x` rules (SQL errors, stack traces, web shells, data leakage) can block.
-2. Response header phase with enforcement.
-3. Enable the 105 response-side CRS regression tests.
+- Phases 3-4 run before the response reaches the client and can block (`ResponseInspector`).
+- Response limit actions (Reject → 500, ProcessPartial), `ctl:forceResponseBodyVariable`, JSON and XML response
+  processors (`RESPONSE_ARGS`, `RESPONSE_XML`).
+- Response inspection on by default, with JSON added; `InspectResponses` and `OutboundAnomalyScoreThreshold` options.
+- All 105 response-side CRS regression tests enabled and passing.
 
 ### Milestone 3: operations
 

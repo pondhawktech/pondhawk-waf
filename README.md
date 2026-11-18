@@ -3,8 +3,8 @@
 A web application firewall for ASP.NET Core, modeled after [OWASP Coraza](https://coraza.io). It runs SecLang rules
 and ships the [OWASP Core Rule Set](https://coreruleset.org) (CRS) v4.30.0.
 
-Status: milestone 1, request-side protection. All 5,088 request-side CRS regression tests pass (see
-[Testing](#testing)). Response inspection is planned for milestone 2 ([docs/DESIGN.md](docs/DESIGN.md)).
+Status: milestone 2, request and response protection. All 5,193 CRS regression tests pass (see
+[Testing](#testing)). Roadmap: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## What it protects against
 
@@ -19,9 +19,15 @@ CRS at paranoia level 1, on the query string, path, headers, cookies, and form, 
 | PHP, Java, Node.js and generic injection, SSRF | 933xxx, 944xxx, 934xxx |
 | Protocol violations, request smuggling, header injection | 920xxx, 921xxx |
 | Multipart evasion, session fixation, scanners | 922xxx, 943xxx, 913xxx |
+| Data leakage in responses: SQL errors, stack traces, PHP/Java/IIS/Ruby errors, directory listings | 950xxx-956xxx |
+| Web shells in responses | 955xxx |
 
 The base configuration also rejects bodies that cannot be parsed, strict multipart errors, more than 1,000
 arguments, and bodies over 13 MiB (413).
+
+Responses of type `text/html`, `text/plain`, `text/xml`, `application/json` and `application/problem+json` are held
+in memory (up to 512 KiB) and inspected before the client receives any byte. A match replaces the response with an
+empty 403. Other responses stream through unchanged; larger responses are inspected on their first 512 KiB.
 
 ## Quick start
 
@@ -39,11 +45,15 @@ var app = builder.Build();
 app.UsePondhawkWaf();                         // early: before routing, auth and body readers
 ```
 
+Middleware order: place `UseResponseCompression()` **before** `UsePondhawkWaf()`, so the WAF sees uncompressed
+responses. Compressed responses (`Content-Encoding` set by the application) are not inspected.
+
 Run the sample:
 
 ```sh
 dotnet run --project samples/Pondhawk.Waf.Sample
-curl -i "http://localhost:5000/search?q=1'%20OR%20'1'='1"   # 403
+curl -i "http://localhost:5000/search?q=1'%20OR%20'1'='1"   # 403: SQL injection
+curl -i "http://localhost:5000/leaky"                          # 403: SQL error leaked in the response
 ```
 
 ## Rollout
@@ -59,7 +69,9 @@ curl -i "http://localhost:5000/search?q=1'%20OR%20'1'='1"   # 403
 |---|---|---|
 | `RuleEngine` | from config (`DetectionOnly`) | `On`, `DetectionOnly` or `Off` |
 | `ParanoiaLevel` | 1 | CRS paranoia level 1-4 |
-| `InboundAnomalyScoreThreshold` | 5 | CRS blocking threshold; one critical match = 5 |
+| `InboundAnomalyScoreThreshold` | 5 | CRS request blocking threshold; one critical match = 5 |
+| `OutboundAnomalyScoreThreshold` | 4 | CRS response blocking threshold; one error-level leak = 4 |
+| `InspectResponses` | true | Hold and inspect text and JSON responses (phases 3-4) |
 | `Directives` | none | SecLang loaded after CRS setup, before the CRS rules |
 | `DirectivesAfterRules` | none | SecLang loaded after the CRS rules |
 | `RuleFiles` | none | SecLang files from disk, loaded last |
@@ -119,8 +131,7 @@ dotnet run --project tests/Pondhawk.Waf.CrsRegression -c Release # CRS regressio
 The regression runner sends each CRS test as raw bytes to Kestrel with the configuration Coraza uses for the same
 suite (paranoia level 4, DetectionOnly), and compares the logged rule ids. Results for CRS v4.30.0:
 
-- 5,088 / 5,088 request-side tests pass.
-- 105 response-side tests are skipped (milestone 2).
+- 5,193 / 5,193 tests pass (5,088 request-side, 105 response-side). The backend implements albedo's `/reflect`.
 - 21 tests use expectations from `kestrel-overrides.yaml`: requests that Kestrel rejects (400/505) or normalizes
   before the middleware runs. Each has a reason.
 
@@ -131,7 +142,7 @@ Options: `--filter <rule-id or text>`, `--filter '942100-3$'` (exact), `--verbos
 Measured in-process on the development machine (Release, full CRS, paranoia level 1):
 
 - Startup: about 3.5 s to load and compile CRS (668 rules), plus warm-up.
-- Per request: about 1.2 ms for a typical form POST (all phases).
+- Per request: about 1.2 ms for a typical form POST; about 1.6 ms with a 10 KB HTML response inspected.
 
 ## License
 

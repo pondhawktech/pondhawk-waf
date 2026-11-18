@@ -57,6 +57,8 @@ public sealed class Transaction : IDisposable
         v.InboundDataError.Set("0");
         v.ReqbodyError.Set("0");
         v.ReqbodyProcessorError.Set("0");
+        v.ResBodyError.Set("0");
+        v.ResBodyProcessorError.Set("0");
         v.RequestBodyLength.Set("0");
         v.Duration.Set("0");
         v.HighestSeverity.Set("255");
@@ -402,7 +404,10 @@ public sealed class Transaction : IDisposable
         return Interruption;
     }
 
-    /// <summary>True when the response body should be buffered for inspection (access on and MIME type listed).</summary>
+    /// <summary>
+    /// True when the response body is inspected: SecResponseBodyAccess is on and the response MIME type is listed in
+    /// SecResponseBodyMimeType (or ctl:forceResponseBodyVariable is on).
+    /// </summary>
     public bool IsResponseBodyProcessable
     {
         get
@@ -412,52 +417,101 @@ public sealed class Transaction : IDisposable
                 return false;
             }
 
+            if (ForceResponseBodyVariable)
+            {
+                return true;
+            }
+
             var ct = Variables.ResponseContentType.Value;
-            return Waf.Config.ResponseBodyMimeTypes.Count == 0
-                   || Waf.Config.ResponseBodyMimeTypes.Contains(ct, StringComparer.OrdinalIgnoreCase);
+            return Waf.Config.ResponseBodyMimeTypes.Contains(ct, StringComparer.OrdinalIgnoreCase);
         }
     }
 
+    /// <summary>Set by ctl:forceResponseBodyVariable: inspect the response body whatever its MIME type.</summary>
+    public bool ForceResponseBodyVariable { get; set; }
+
+    /// <summary>
+    /// Buffers response body bytes for phase 4. At the limit: with Reject, interrupts with 500; with ProcessPartial,
+    /// runs phase 4 on what is buffered and accepts no more. Returns the number of bytes buffered.
+    /// </summary>
     public (Interruption? Interruption, int Written) WriteResponseBody(ReadOnlySpan<byte> data)
     {
-        if (!IsResponseBodyProcessable)
+        if (IsRuleEngineOff || !ResponseBodyAccess)
         {
             return (null, 0);
         }
 
-        var room = ResponseBodyLimit - _responseBody.Length;
-        if (room <= 0)
+        var writing = (long)data.Length;
+        var processNow = false;
+        if (_responseBody.Length + writing > ResponseBodyLimit)
         {
             Variables.OutboundDataError.Set("1");
-            return (null, 0);
+            if (Waf.Config.ResponseBodyLimitAction == BodyLimitAction.Reject)
+            {
+                Interruption = new Interruption(0, "deny", 500, null);
+                return (Interruption, 0);
+            }
+
+            writing = ResponseBodyLimit - _responseBody.Length;
+            processNow = true;
         }
 
-        var writing = (int)Math.Min(room, data.Length);
-        if (writing < data.Length)
+        _responseBody.Write(data[..(int)writing]);
+        if (processNow && LastPhase == Phases.ResponseHeaders)
         {
-            Variables.OutboundDataError.Set("1");
+            // ProcessPartial: inspect what fits; the rest is not inspected.
+            ProcessResponseBody();
         }
 
-        _responseBody.Write(data[..writing]);
-        return (Interruption, writing);
+        return (Interruption, (int)writing);
     }
 
+    /// <summary>Runs phase 4. Call after ProcessResponseHeaders and after all body bytes were written.</summary>
     public Interruption? ProcessResponseBody()
     {
-        if (IsRuleEngineOff || IsInterrupted || LastPhase >= Phases.ResponseBody)
+        if (IsRuleEngineOff || IsInterrupted || LastPhase != Phases.ResponseHeaders)
         {
             return Interruption;
         }
 
-        if (IsResponseBodyProcessable && _responseBody.Length > 0)
+        if (!IsResponseBodyProcessable)
         {
-            var body = _responseBody.ReadAll();
+            Eval(Phases.ResponseBody);
+            return Interruption;
+        }
+
+        var body = _responseBody.ReadAll();
+        var processor = Variables.ResBodyProcessor.Value;
+        if (processor.Length > 0)
+        {
+            try
+            {
+                if (!BodyProcessor.TryProcessResponse(processor, body, this, Waf.Config.RequestBodyJsonDepthLimit, Waf.Config.ArgumentsLimit))
+                {
+                    ResponseBodyError("invalid body processor");
+                }
+            }
+            catch (BodyProcessorException ex)
+            {
+                ResponseBodyError(ex.Message);
+            }
+        }
+        else
+        {
             Variables.ResponseBody.Set(ByteString.FromBytes(body));
             Variables.ResponseContentLength.Set(body.Length.ToString(CultureInfo.InvariantCulture));
         }
 
         Eval(Phases.ResponseBody);
         return Interruption;
+    }
+
+    private void ResponseBodyError(string message)
+    {
+        Variables.ResBodyError.Set("1");
+        Variables.ResBodyErrorMsg.Set($"{Variables.ResBodyProcessor.Value}: {message}");
+        Variables.ResBodyProcessorError.Set("1");
+        Variables.ResBodyProcessorErrorMsg.Set(message);
     }
 
     /// <summary>Runs phase 5 and writes the audit log entry when relevant.</summary>

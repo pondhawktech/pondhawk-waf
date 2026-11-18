@@ -9,7 +9,8 @@ public class PerfProbe
     public void Measure()
     {
         var sw = Stopwatch.StartNew();
-        var waf = CrsSmokeTests.BuildCrs("SecAction \"id:900001,phase:1,pass,nolog,setvar:tx.blocking_paranoia_level=1\"");
+        var waf = CrsSmokeTests.BuildCrs("SecAction \"id:900001,phase:1,pass,nolog,setvar:tx.blocking_paranoia_level=1\"\nSecResponseBodyAccess On");
+        var html = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("<div class=\"item\"><a href=\"/p/1\">Garden hose 25 m</a><span>19.99</span></div>\n", 130)));
         var load = sw.ElapsedMilliseconds;
         var body = Encoding.UTF8.GetBytes("username=alice&password=secret123&remember=on&comment=Hello+there%2C+this+is+a+normal+comment.");
         double Run(int n)
@@ -28,7 +29,9 @@ public class PerfProbe
                 tx.ProcessRequestHeaders();
                 tx.WriteRequestBody(body);
                 tx.ProcessRequestBody();
+                tx.AddResponseHeader("Content-Type", "text/html; charset=utf-8");
                 tx.ProcessResponseHeaders(200, "HTTP/1.1");
+                tx.WriteResponseBody(html);
                 tx.ProcessResponseBody();
                 tx.ProcessLogging();
             }
@@ -40,6 +43,6 @@ public class PerfProbe
         Run(200);
         var avg = Run(2000);
         File.WriteAllText("/tmp/claude-1000/-home-jmoring-repositories-pondhawk-waf/38b0d848-8464-46d6-aef4-f16c41710ac0/scratchpad/perf.txt",
-            $"load={load}ms first={first:F0}us avg={avg:F0}us rules={waf.Rules.Count}");
+            $"load={load}ms first={first:F0}us avg={avg:F0}us rules={waf.Rules.Count} html={html.Length}");
     }
 }

@@ -246,6 +246,87 @@ public class EngineTests
         Assert.Equal("1", tx.Variables.ArgsGet.GetFirst("x"));
     }
 
+    private static Transaction RunResponse(WafEngine waf, string contentType, string body)
+    {
+        var tx = Run(waf, "/");
+        tx.AddResponseHeader("Content-Type", contentType);
+        if (tx.ProcessResponseHeaders(200, "HTTP/1.1") is null)
+        {
+            tx.WriteResponseBody(Encoding.UTF8.GetBytes(body));
+            tx.ProcessResponseBody();
+        }
+
+        return tx;
+    }
+
+    [Fact]
+    public void ResponseBodyRuleBlocksInPhase4()
+    {
+        var waf = WafEngine.FromDirectives("""
+            SecRuleEngine On
+            SecResponseBodyAccess On
+            SecResponseBodyMimeType text/html
+            SecRule RESPONSE_BODY "@contains secret" "id:90,phase:4,deny"
+            """);
+        using (var html = RunResponse(waf, "text/html; charset=utf-8", "a secret"))
+        {
+            Assert.Equal(90, html.Interruption?.RuleId);
+        }
+
+        // A MIME type that is not listed is not inspected.
+        using var image = RunResponse(waf, "image/png", "a secret");
+        Assert.Null(image.Interruption);
+        Assert.Equal(string.Empty, image.Variables.ResponseBody.Value);
+    }
+
+    [Fact]
+    public void ResponseBodyLimitRejectInterruptsWith500()
+    {
+        var waf = WafEngine.FromDirectives("""
+            SecRuleEngine On
+            SecResponseBodyAccess On
+            SecResponseBodyMimeType text/plain
+            SecResponseBodyLimit 5
+            SecResponseBodyLimitAction Reject
+            """);
+        using var tx = RunResponse(waf, "text/plain", "123456");
+        Assert.Equal(500, tx.Interruption?.Status);
+    }
+
+    [Fact]
+    public void ResponseBodyLimitProcessPartialInspectsTheFirstBytes()
+    {
+        var waf = WafEngine.FromDirectives("""
+            SecRuleEngine On
+            SecResponseBodyAccess On
+            SecResponseBodyMimeType text/plain
+            SecResponseBodyLimit 6
+            SecResponseBodyLimitAction ProcessPartial
+            SecRule RESPONSE_BODY "@streq secret" "id:91,phase:4,deny"
+            """);
+        var tx = Run(waf, "/");
+        tx.AddResponseHeader("Content-Type", "text/plain");
+        tx.ProcessResponseHeaders(200, "HTTP/1.1");
+        var (interruption, written) = tx.WriteResponseBody(Encoding.ASCII.GetBytes("secret and more"));
+        Assert.Equal(6, written);
+        Assert.Equal(91, interruption?.RuleId);
+        Assert.Equal("1", tx.Variables.OutboundDataError.Value);
+        tx.Dispose();
+    }
+
+    [Fact]
+    public void JsonResponseProcessorFillsResponseArgs()
+    {
+        var waf = WafEngine.FromDirectives("""
+            SecRuleEngine On
+            SecResponseBodyAccess On
+            SecRule RESPONSE_HEADERS:Content-Type "@beginsWith application/json" "id:1,phase:3,pass,nolog,ctl:forceResponseBodyVariable=On,ctl:responseBodyProcessor=JSON"
+            SecRule RESPONSE_ARGS:json.user.ssn "@rx ^\d{3}-\d{2}-\d{4}$" "id:92,phase:4,deny"
+            """);
+        using var tx = RunResponse(waf, "application/json", """{"user":{"ssn":"123-45-6789"}}""");
+        Assert.Equal(92, tx.Interruption?.RuleId);
+    }
+
     [Theory]
     [InlineData("SecRule ARGS \"@rx x\" \"phase:1,pass\"", "rules must have an id")]
     [InlineData("SecFoo On", "unknown directive")]

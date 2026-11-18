@@ -63,8 +63,13 @@ public static class WafServiceCollectionExtensions
         {
             builder.AddDirectives(string.Create(ci, $"""
                 SecAction "id:900000,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.blocking_paranoia_level={options.ParanoiaLevel}"
-                SecAction "id:900110,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.inbound_anomaly_score_threshold={options.InboundAnomalyScoreThreshold}"
+                SecAction "id:900110,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.inbound_anomaly_score_threshold={options.InboundAnomalyScoreThreshold},setvar:tx.outbound_anomaly_score_threshold={options.OutboundAnomalyScoreThreshold}"
                 """));
+        }
+
+        if (!options.InspectResponses)
+        {
+            builder.AddDirectives("SecResponseBodyAccess Off");
         }
 
         if (options.RuleEngine is { } engine)

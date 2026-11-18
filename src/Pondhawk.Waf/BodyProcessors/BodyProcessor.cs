@@ -28,13 +28,29 @@ public static class BodyProcessor
                 Multipart.Process(body, tx, options);
                 return true;
             case "JSON":
-                ProcessJson(body, tx, options);
+                ProcessJson(body, tx, options, tx.Variables.ArgsPost);
                 return true;
             case "XML":
-                ProcessXml(body, tx);
+                ProcessXml(body, tx, tx.Variables.RequestXml);
                 return true;
             case "RAW":
                 SetRequestBody(body, tx);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>Runs a response body processor (JSON fills RESPONSE_ARGS, XML fills RESPONSE_XML). False if unknown.</summary>
+    public static bool TryProcessResponse(string name, byte[] body, Transaction tx, int jsonDepthLimit, int argumentsLimit)
+    {
+        switch (name.ToUpperInvariant())
+        {
+            case "JSON":
+                ProcessJson(body, tx, new BodyProcessorOptions(string.Empty, jsonDepthLimit, argumentsLimit), tx.Variables.ResponseArgs);
+                return true;
+            case "XML":
+                ProcessXml(body, tx, tx.Variables.ResponseXml);
                 return true;
             default:
                 return false;
@@ -59,7 +75,7 @@ public static class BodyProcessor
         SetRequestBody(body, tx);
     }
 
-    private static void ProcessJson(byte[] body, Transaction tx, BodyProcessorOptions options)
+    private static void ProcessJson(byte[] body, Transaction tx, BodyProcessorOptions options, Collections.MapCollection target)
     {
         JsonDocument doc;
         try
@@ -80,7 +96,7 @@ public static class BodyProcessor
         {
             var state = new JsonFlattenState(options.ArgumentsLimit);
             var key = new StringBuilder("json");
-            Flatten(doc.RootElement, key, tx, state);
+            Flatten(doc.RootElement, key, target, state);
             if (state.Truncated)
             {
                 tx.Variables.ArgumentsLimitReached.Set("1");
@@ -99,7 +115,7 @@ public static class BodyProcessor
         public bool Full => Limit > 0 && Count >= Limit;
     }
 
-    private static void Flatten(JsonElement element, StringBuilder key, Transaction tx, JsonFlattenState state)
+    private static void Flatten(JsonElement element, StringBuilder key, Collections.MapCollection target, JsonFlattenState state)
     {
         switch (element.ValueKind)
         {
@@ -114,7 +130,7 @@ public static class BodyProcessor
 
                     var len = key.Length;
                     key.Append('.').Append(ByteString.FromUtf16(prop.Name));
-                    Flatten(prop.Value, key, tx, state);
+                    Flatten(prop.Value, key, target, state);
                     key.Length = len;
                 }
 
@@ -131,7 +147,7 @@ public static class BodyProcessor
 
                     var len = key.Length;
                     key.Append('.').Append(index.ToString(CultureInfo.InvariantCulture));
-                    Flatten(item, key, tx, state);
+                    Flatten(item, key, target, state);
                     key.Length = len;
                     index++;
                 }
@@ -139,7 +155,7 @@ public static class BodyProcessor
                 if (index > 0 && !state.Full)
                 {
                     // The array length, as Coraza records it.
-                    tx.Variables.ArgsPost.Add(key.ToString(), index.ToString(CultureInfo.InvariantCulture));
+                    target.Add(key.ToString(), index.ToString(CultureInfo.InvariantCulture));
                 }
 
                 break;
@@ -156,13 +172,13 @@ public static class BodyProcessor
                     JsonValueKind.Null => string.Empty,
                     _ => element.GetRawText(),
                 };
-                tx.Variables.ArgsPost.Add(key.ToString(), value);
+                target.Add(key.ToString(), value);
                 state.Count++;
                 break;
         }
     }
 
-    private static void ProcessXml(byte[] body, Transaction tx)
+    private static void ProcessXml(byte[] body, Transaction tx, Collections.MapCollection target)
     {
         var attributes = new List<string>();
         var contents = new List<string>();
@@ -216,8 +232,8 @@ public static class BodyProcessor
             error = ex.Message;
         }
 
-        tx.Variables.RequestXml.Set("//@*", attributes);
-        tx.Variables.RequestXml.Set("/*", contents);
+        target.Set("//@*", attributes);
+        target.Set("/*", contents);
         if (error is not null)
         {
             throw new BodyProcessorException("invalid XML: " + error);

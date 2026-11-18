@@ -26,6 +26,10 @@ app.MapGet("/search", (string? q) => $"results for {q}");
 app.MapPost("/login", (HttpRequest request) => Results.Ok(new { user = request.Form["user"].ToString() }));
 app.MapPost("/api/items", (Item item) => Results.Created($"/api/items/{item.Name}", item));
 
+// Simulates an application that leaks a database error. The WAF replaces the response (CRS 951xxx).
+app.MapGet("/leaky", () => Results.Problem(
+    "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version"));
+
 app.Run();
 
 internal sealed record Item(string Name, int Quantity);

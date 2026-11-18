@@ -532,6 +532,13 @@ internal sealed class CtlAction : IRuleAction
                 }
 
                 break;
+            case "forceresponsebodyvariable":
+                if (TryParseOnOff(_value, out var forceResponse))
+                {
+                    tx.ForceResponseBodyVariable = forceResponse;
+                }
+
+                break;
             case "requestbodyaccess":
                 if (tx.LastPhase <= 1 && TryParseOnOff(_value, out var access))
                 {
