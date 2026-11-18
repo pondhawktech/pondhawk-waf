@@ -4,6 +4,9 @@
     <Description>ASP.NET Core middleware for the Pondhawk WAF engine.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Pondhawk.Waf.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>

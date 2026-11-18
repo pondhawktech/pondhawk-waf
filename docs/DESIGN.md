@@ -121,6 +121,12 @@ Ordered by protection value.
 - Response inspection on by default, with JSON added; `InspectResponses` and `OutboundAnomalyScoreThreshold` options.
 - All 105 response-side CRS regression tests enabled and passing.
 
+### Profiles (done)
+
+- `WafProfile` (Performance, Balanced, Strict, Paranoid) with `WafSettings`; nullable options override single values.
+- Guard rule 900002 keeps the detection paranoia level at or above the blocking level (CRS 901500 would otherwise
+  deny every request with 500).
+
 ### Milestone 3: operations
 
 1. Configuration from `appsettings.json` (rule engine, paranoia level, exclusions) and reload without restart.

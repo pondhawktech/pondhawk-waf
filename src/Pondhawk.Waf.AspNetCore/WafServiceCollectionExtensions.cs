@@ -39,6 +39,34 @@ public static class WafServiceCollectionExtensions
         return app.UseMiddleware<WafMiddleware>();
     }
 
+    /// <summary>
+    /// The SecLang that applies resolved settings. Loaded after the base configuration and CRS setup, and before
+    /// <see cref="WafOptions.Directives"/>, so per-path ctl rules and directives there still win.
+    /// </summary>
+    internal static string SettingsDirectives(WafSettings s, bool coreRuleSet)
+    {
+        var ci = CultureInfo.InvariantCulture;
+        var sb = new System.Text.StringBuilder();
+        if (coreRuleSet)
+        {
+            sb.AppendLine(string.Create(ci, $"SecAction \"id:900000,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.blocking_paranoia_level={s.ParanoiaLevel}\""));
+            sb.AppendLine(string.Create(ci, $"SecAction \"id:900001,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.detection_paranoia_level={s.DetectionParanoiaLevel}\""));
+            sb.AppendLine(string.Create(ci, $"SecAction \"id:900110,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.inbound_anomaly_score_threshold={s.InboundAnomalyScoreThreshold},setvar:tx.outbound_anomaly_score_threshold={s.OutboundAnomalyScoreThreshold}\""));
+        }
+
+        sb.AppendLine(string.Create(ci, $"SecRequestBodyLimit {s.RequestBodyLimit}"));
+        sb.AppendLine(string.Create(ci, $"SecArgumentsLimit {s.ArgumentsLimit}"));
+        sb.AppendLine(s.InspectResponses ? "SecResponseBodyAccess On" : "SecResponseBodyAccess Off");
+        sb.AppendLine("SecResponseBodyMimeTypesClear");
+        if (s.ResponseMimeTypes.Count > 0)
+        {
+            sb.AppendLine("SecResponseBodyMimeType " + string.Join(' ', s.ResponseMimeTypes));
+        }
+
+        sb.AppendLine(string.Create(ci, $"SecResponseBodyLimit {s.ResponseBodyLimit}"));
+        return sb.ToString();
+    }
+
     internal static WafEngine CreateEngine(WafOptions options, ILoggerFactory loggerFactory)
     {
         var fs = new CompositeConfigFileSystem(CoreRuleSetFiles.FileSystem);
@@ -53,24 +81,8 @@ public static class WafServiceCollectionExtensions
             builder.AddDirectives(CoreRuleSetFiles.BaseDirectives);
         }
 
-        var ci = CultureInfo.InvariantCulture;
-        if (options.ParanoiaLevel is < 1 or > 4)
-        {
-            throw new ArgumentOutOfRangeException(nameof(options), "ParanoiaLevel must be 1-4.");
-        }
-
-        if (options.UseCoreRuleSet)
-        {
-            builder.AddDirectives(string.Create(ci, $"""
-                SecAction "id:900000,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.blocking_paranoia_level={options.ParanoiaLevel}"
-                SecAction "id:900110,phase:1,pass,t:none,nolog,tag:'OWASP_CRS',ver:'OWASP_CRS/4.30.0',setvar:tx.inbound_anomaly_score_threshold={options.InboundAnomalyScoreThreshold},setvar:tx.outbound_anomaly_score_threshold={options.OutboundAnomalyScoreThreshold}"
-                """));
-        }
-
-        if (!options.InspectResponses)
-        {
-            builder.AddDirectives("SecResponseBodyAccess Off");
-        }
+        var settings = options.Resolve();
+        builder.AddDirectives(SettingsDirectives(settings, options.UseCoreRuleSet));
 
         if (options.RuleEngine is { } engine)
         {
@@ -84,6 +96,13 @@ public static class WafServiceCollectionExtensions
 
         if (options.UseCoreRuleSet)
         {
+            // CRS rule 901500 answers every request with 500 when the detection paranoia level is below the blocking
+            // level. A blocking level raised in Directives (setvar:tx.blocking_paranoia_level=N) would do that with the
+            // profile's detection level, so raise the detection level to the blocking level here.
+            builder.AddDirectives("""
+                SecRule TX:detection_paranoia_level "@lt %{tx.blocking_paranoia_level}" \
+                    "id:900002,phase:1,pass,t:none,nolog,setvar:'tx.detection_paranoia_level=%{tx.blocking_paranoia_level}'"
+                """);
             builder.AddDirectives(CoreRuleSetFiles.RuleDirectives);
         }
 

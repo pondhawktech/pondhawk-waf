@@ -13,20 +13,60 @@ public sealed class WafOptions
     /// </summary>
     public RuleEngineMode? RuleEngine { get; set; }
 
-    /// <summary>CRS paranoia level 1-4 (tx.blocking_paranoia_level). Higher catches more and has more false positives.</summary>
-    public int ParanoiaLevel { get; set; } = 1;
+    /// <summary>
+    /// Pre-selected security/performance settings. Default <see cref="WafProfile.Balanced"/>. The options below
+    /// override single values of the profile when set. <see cref="RuleEngine"/> is not part of a profile.
+    /// </summary>
+    public WafProfile Profile { get; set; } = WafProfile.Balanced;
 
-    /// <summary>CRS inbound anomaly score threshold (tx.inbound_anomaly_score_threshold). Default 5: one critical match blocks.</summary>
-    public int InboundAnomalyScoreThreshold { get; set; } = 5;
-
-    /// <summary>CRS outbound anomaly score threshold (tx.outbound_anomaly_score_threshold). Default 4: one error-level leak blocks.</summary>
-    public int OutboundAnomalyScoreThreshold { get; set; } = 4;
+    /// <summary>CRS blocking paranoia level 1-4. Higher catches more and has more false positives. Null: from the profile.</summary>
+    public int? ParanoiaLevel { get; set; }
 
     /// <summary>
-    /// Inspect response bodies (SecResponseBodyAccess). Text responses (text/html, text/plain, text/xml) are held in
-    /// memory up to 512 KiB before they are sent. Default true.
+    /// CRS detection paranoia level 1-4: rules above <see cref="ParanoiaLevel"/> up to this level log but do not block.
+    /// Null: from the profile, raised to <see cref="ParanoiaLevel"/> when that is higher.
     /// </summary>
-    public bool InspectResponses { get; set; } = true;
+    public int? DetectionParanoiaLevel { get; set; }
+
+    /// <summary>Request anomaly score that blocks (critical match = 5). Null: from the profile.</summary>
+    public int? InboundAnomalyScoreThreshold { get; set; }
+
+    /// <summary>Response anomaly score that blocks (error-level leak = 4). Null: from the profile.</summary>
+    public int? OutboundAnomalyScoreThreshold { get; set; }
+
+    /// <summary>Hold and inspect response bodies (phases 3-4 on the body). Null: from the profile.</summary>
+    public bool? InspectResponses { get; set; }
+
+    /// <summary>Response MIME types that are held and inspected. Null: from the profile.</summary>
+    public IReadOnlyList<string>? ResponseMimeTypes { get; set; }
+
+    /// <summary>Response bytes held and inspected; the rest of a larger response is not inspected. Null: from the profile.</summary>
+    public long? ResponseBodyLimit { get; set; }
+
+    /// <summary>Largest request body; larger bodies are rejected with 413. Null: from the profile.</summary>
+    public long? RequestBodyLimit { get; set; }
+
+    /// <summary>Most arguments per request; more are rejected with 400. Null: from the profile.</summary>
+    public int? ArgumentsLimit { get; set; }
+
+    /// <summary>Returns the effective settings: the profile with the options above applied. Validates them.</summary>
+    public WafSettings Resolve()
+    {
+        var p = WafSettings.For(Profile);
+        var paranoia = ParanoiaLevel ?? p.ParanoiaLevel;
+        var settings = new WafSettings(
+            paranoia,
+            DetectionParanoiaLevel ?? Math.Max(p.DetectionParanoiaLevel, paranoia),
+            InboundAnomalyScoreThreshold ?? p.InboundAnomalyScoreThreshold,
+            OutboundAnomalyScoreThreshold ?? p.OutboundAnomalyScoreThreshold,
+            InspectResponses ?? p.InspectResponses,
+            ResponseMimeTypes ?? p.ResponseMimeTypes,
+            ResponseBodyLimit ?? p.ResponseBodyLimit,
+            RequestBodyLimit ?? p.RequestBodyLimit,
+            ArgumentsLimit ?? p.ArgumentsLimit);
+        settings.Validate();
+        return settings;
+    }
 
     /// <summary>SecLang loaded after the CRS setup and before the CRS rules: SecAction tuning, ctl-based exclusions.</summary>
     public string? Directives { get; set; }

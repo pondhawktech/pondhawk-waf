@@ -37,8 +37,8 @@ using Pondhawk.Waf.AspNetCore;
 
 builder.Services.AddPondhawkWaf(options =>
 {
+    options.Profile = WafProfile.Balanced;    // Performance, Balanced (default), Strict, Paranoid
     options.RuleEngine = RuleEngineMode.On;   // default: DetectionOnly
-    options.ParanoiaLevel = 1;                // 1-4
 });
 
 var app = builder.Build();
@@ -63,21 +63,68 @@ curl -i "http://localhost:5000/leaky"                          # 403: SQL error 
 3. Add exclusions (below).
 4. Set `RuleEngine = RuleEngineMode.On`.
 
+## Profiles
+
+A profile pre-selects the security/performance settings. Any option set explicitly overrides the profile value.
+`RuleEngine` (block or only log) is not part of a profile.
+
+| Setting | `Performance` | `Balanced` (default) | `Strict` | `Paranoid` |
+|---|---|---|---|---|
+| Blocking paranoia level | 1 | 1 | 2 | 3 |
+| Detection paranoia level (log only) | 1 | 2 | 3 | 4 |
+| Inbound / outbound anomaly threshold | 5 / 4 | 5 / 4 | 5 / 4 | 3 / 3 |
+| Response inspection | off | text, JSON | text, JSON, XML | text, JSON, XML |
+| Response bytes inspected | — | 512 KiB | 1 MiB | 1 MiB |
+| Request body limit | 13 MiB | 13 MiB | 8 MiB | 4 MiB |
+| Arguments limit | 1000 | 1000 | 500 | 255 |
+| Over-limit request body | 413 | 413 | 413 | 413 |
+| Time per request (see below) | 0.6 ms | 1.2 ms | 1.5 ms | 1.4 ms |
+| False positives / tuning effort | low | low | medium | high |
+
+- `Performance` has the same request-side protection as `Balanced`. It drops response inspection and the log-only
+  level 2 rules.
+- Rules between the blocking and the detection level run and log (`Pondhawk.Waf.Rules`) but never block. Use the
+  log to see what the next profile would block before you move to it.
+- `Paranoid` blocks on a single warning-level match (threshold 3). Example: a POST without `Content-Length`
+  (920180), or a parameter named `id` (932350, Unix command `id`). Expect exclusions.
+- Time per request: in-process, Release build, one form POST plus a 10 KB HTML response, full CRS, single run on the
+  development machine. Strict and Paranoid differ by less than the run-to-run noise.
+
+```csharp
+options.Profile = WafProfile.Strict;
+options.InspectResponses = false;   // override: keep Strict rules, skip response buffering
+options.ParanoiaLevel = 1;          // override: block at level 1; detection stays at 3
+```
+
+`options.Resolve()` returns the effective settings (`WafSettings`) and validates them. Startup fails on an invalid
+combination, e.g. a detection level lower than the blocking level.
+
 ## Configuration
 
 | Option | Default | Purpose |
 |---|---|---|
+| `Profile` | `Balanced` | Pre-selected settings (above) |
 | `RuleEngine` | from config (`DetectionOnly`) | `On`, `DetectionOnly` or `Off` |
-| `ParanoiaLevel` | 1 | CRS paranoia level 1-4 |
-| `InboundAnomalyScoreThreshold` | 5 | CRS request blocking threshold; one critical match = 5 |
-| `OutboundAnomalyScoreThreshold` | 4 | CRS response blocking threshold; one error-level leak = 4 |
-| `InspectResponses` | true | Hold and inspect text and JSON responses (phases 3-4) |
-| `Directives` | none | SecLang loaded after CRS setup, before the CRS rules |
+| `ParanoiaLevel` | profile | CRS blocking paranoia level 1-4 |
+| `DetectionParanoiaLevel` | profile | CRS log-only paranoia level; not lower than `ParanoiaLevel` |
+| `InboundAnomalyScoreThreshold` | profile | Request score that blocks; critical = 5, error = 4, warning = 3 |
+| `OutboundAnomalyScoreThreshold` | profile | Response score that blocks |
+| `InspectResponses` | profile | Hold and inspect response bodies (phases 3-4) |
+| `ResponseMimeTypes` | profile | Response MIME types held and inspected |
+| `ResponseBodyLimit` | profile | Response bytes held and inspected |
+| `RequestBodyLimit` | profile | Largest request body (413 above) |
+| `ArgumentsLimit` | profile | Most arguments per request (400 above) |
+| `Directives` | none | SecLang loaded after the profile settings, before the CRS rules |
 | `DirectivesAfterRules` | none | SecLang loaded after the CRS rules |
 | `RuleFiles` | none | SecLang files from disk, loaded last |
 | `Bypass` | none | Predicate for requests that skip the WAF |
 | `UseCoreRuleSet` | true | Load the embedded CRS |
 | `WarmUp` | true | Pre-build regex automata at startup |
+
+Load order: base configuration → CRS setup → profile settings → `Directives` → CRS rules → `DirectivesAfterRules`
+→ `RuleFiles`. Later settings win, so per-path `ctl` rules in `Directives` override the profile. If `Directives`
+raises `tx.blocking_paranoia_level`, the detection level is raised with it (otherwise CRS rule 901500 would answer
+every request with 500).
 
 ### Exclusions
 

@@ -7,7 +7,7 @@ builder.Services.AddPondhawkWaf(options =>
 {
     // Start in DetectionOnly, review the "Pondhawk.Waf.Rules" log, then switch to On.
     options.RuleEngine = builder.Configuration.GetValue("Waf:Enforce", false) ? RuleEngineMode.On : RuleEngineMode.DetectionOnly;
-    options.ParanoiaLevel = 1;
+    options.Profile = WafProfile.Balanced;
     options.Bypass = ctx => ctx.Request.Path == "/healthz";
 
     // Example exclusion: the "password" argument of /login never triggers SQLi rules.
