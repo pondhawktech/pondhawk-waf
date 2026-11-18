@@ -7,11 +7,14 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>Pondhawk.Waf.LibInjection</RootNamespace>
     <Description>C# port of libinjection-go (SQLi and XSS detection), BSD-3-Clause.</Description>
-    <PackageLicenseFile>LICENSE-libinjection.txt</PackageLicenseFile>
+    <!-- A port of libinjection-go: BSD-3-Clause, not the Apache-2.0 of the other packages. -->
+    <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="LICENSE-libinjection.txt" Pack="true" PackagePath="" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The repository LICENSE is Apache-2.0; this package ships the libinjection BSD license instead. -->
+    <None Remove="$(MSBuildThisFileDirectory)../../LICENSE" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <RootNamespace>Pondhawk.Waf</RootNamespace>
-    <Description>SecLang web application firewall engine modeled after OWASP Coraza.</Description>
+    <Description>SecLang web application firewall engine for .NET, modeled after OWASP Coraza. Runs the OWASP Core Rule Set unchanged.</Description>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>

@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build
+        run: dotnet build Pondhawk.Waf.slnx --configuration Release
+
+      - name: Test
+        run: dotnet test Pondhawk.Waf.slnx --configuration Release --no-build
+
+      # The OWASP CRS regression suite (5,193 tests) against the middleware on Kestrel. Exits non-zero on a failure.
+      - name: CRS regression suite
+        run: dotnet run --project tests/Pondhawk.Waf.CrsRegression --configuration Release --no-build
+
+      # A prerelease of the next patch, so a CI package never claims a released version.
+      - name: Pack
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          prefix=$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' src/Directory.Build.props)
+          IFS=. read -r major minor patch <<< "$prefix"
+          version="${major}.${minor}.$((patch + 1))-ci.${{ github.run_number }}"
+          dotnet pack Pondhawk.Waf.slnx --configuration Release --no-build --output artifacts -p:Version="$version"
+
+      - name: Upload packages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nuget-packages
+          path: artifacts/*.nupkg
+          retention-days: 30

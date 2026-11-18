@@ -6,7 +6,7 @@ namespace Pondhawk.Waf.LibInjection;
 /// <summary>Byte tables for the SQLi tokenizer.</summary>
 internal static class SqliTables
 {
-    /// <summary>Bytes that end a word: " []{}<>:\?=@!#~+-*/&|^%(),';\t\n\v\f\r\"", 0xA0 and NUL.</summary>
+    /// <summary>Bytes that end a word: <c>" []{}&lt;&gt;:\?=@!#~+-*/&amp;|^%(),';\t\n\v\f\r\""</c>, 0xA0 and NUL.</summary>
     public static readonly bool[] WordReject =
         SqliHelpers.BuildTable([.. " []{}<>:\\?=@!#~+-*/&|^%(),';\t\n\v\f\r\""u8, 0xA0, 0x00]);
 

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <RootNamespace>Pondhawk.Waf.AspNetCore</RootNamespace>
-    <Description>ASP.NET Core middleware for the Pondhawk WAF engine.</Description>
+    <Description>Web application firewall middleware for ASP.NET Core: the OWASP Core Rule Set with profiles, request and response inspection, and audit logging. Install this package.</Description>
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Pondhawk.Waf.Tests" />
