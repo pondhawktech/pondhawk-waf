@@ -198,6 +198,10 @@ foreach (var (group, (p, f)) in byGroup)
 
 Console.WriteLine();
 Console.WriteLine($"Total: {pass} pass, {fail} fail in {sw.Elapsed.TotalSeconds:F1} s");
+foreach (var failure in failures.Take(50))
+{
+    Console.WriteLine("FAIL " + failure);
+}
 if (reportPath is not null)
 {
     await File.WriteAllLinesAsync(reportPath, failures);
