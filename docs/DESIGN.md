@@ -175,11 +175,22 @@ An adversarial review (four reviewers: middleware, body parsing, rule engine, co
    does not apply to targets a server could normalize to another path (dot segments, encoded `/` or `.`,
    backslashes).
 
-### Milestone 4: performance
+### Milestone 4 (done): performance
 
-1. Regex prefilters (literal and minimum-length checks before `@rx`, as Coraza's `SecRxPreFilter`).
-2. Fewer allocations in `GetField` and collections (pooled lists).
-3. Compiled-rule cache to cut startup time.
+1. Regex prefilters (`RegexPrefilter`), as Coraza's `SecRxPreFilter`: the minimum match length and ASCII literals
+   that every match contains, read from the pattern. A value without them skips the regex. Only constructs the
+   analyzer fully understands produce a prefilter; anything else (lookarounds, backreferences, `\Q..\E`) runs the
+   regex as before. The CRS regression runner checks every rejected value against the regex.
+2. Fewer allocations: pooled evaluation scratch (value lists, transformation cache) per engine; transformations
+   return their input when they change nothing; long values are cached per transformation step, so chains that share
+   steps copy a large argument once; one byte string per body; `@pm` searches with `SearchValues`; RULE is filled
+   only when a rule reads it (CRS never does).
+3. Startup: patterns are syntax-checked while the rules load; the NonBacktracking automata, which took most of the
+   startup time, build in parallel in the background (`WafEngine.Compiled`). A rule that needs a regex before then
+   builds it or waits for it. A reload swaps in its engine only when the automata are built. The automata cannot be
+   cached on disk (.NET does not serialize them).
+4. Response bodies: held once, in the transaction's buffer, sized from `Content-Length`. DetectionOnly streams
+   responses and inspects a copy.
 
 ### Later
 

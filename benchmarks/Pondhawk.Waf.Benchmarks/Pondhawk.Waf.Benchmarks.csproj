@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <Description>Measures engine startup, per-request cost and memory. Run in Release on an idle machine.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.0" />
+    <ProjectReference Include="..\..\src\Pondhawk.Waf.AspNetCore\Pondhawk.Waf.AspNetCore.csproj" />
+  </ItemGroup>
+</Project>

@@ -44,6 +44,18 @@ const string TestingConfig = """
     """;
 
 var collected = new ConcurrentBag<int>();
+
+// Every value the regex prefilter rejects is checked against the regex: a prefilter that hides a match is a bypass.
+var prefilterRejected = 0L;
+var prefilterViolations = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+Pondhawk.Waf.Operators.RxOperator.VerifyPrefilter = (op, value) =>
+{
+    Interlocked.Increment(ref prefilterRejected);
+    if (op.RegexMatches(value))
+    {
+        prefilterViolations.TryAdd(op.Regex.ToString(), value);
+    }
+};
 var done = new SemaphoreSlim(0);
 
 // The CRS tests run without plugins (a plugin changes results on its application's paths); the plugin tests run on a
@@ -226,6 +238,12 @@ foreach (var (group, (p, f)) in byGroup)
 
 Console.WriteLine();
 Console.WriteLine($"Total: {pass} pass, {fail} fail in {sw.Elapsed.TotalSeconds:F1} s");
+Console.WriteLine($"Regex prefilter: {prefilterRejected} evaluations skipped, {prefilterViolations.Count} wrongly");
+foreach (var (pattern, value) in prefilterViolations.Take(20))
+{
+    Console.WriteLine($"PREFILTER MISSED A MATCH: /{pattern}/ on '{value}'");
+}
+
 foreach (var failure in failures.Take(50))
 {
     Console.WriteLine("FAIL " + failure);
@@ -238,7 +256,7 @@ if (reportPath is not null)
 
 await app.StopAsync();
 await pluginApp.StopAsync();
-return fail == 0 ? 0 : 1;
+return fail == 0 && prefilterViolations.IsEmpty ? 0 : 1;
 
 static Uri ServerAddress(WebApplication app) =>
     new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First());

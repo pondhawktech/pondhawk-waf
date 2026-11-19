@@ -6,10 +6,23 @@ namespace Pondhawk.Waf.BodyProcessors;
 /// </summary>
 internal sealed class BodyBuffer(long inMemoryLimit, string? tempDirectory) : IDisposable
 {
-    private MemoryStream? _memory = new();
+    private MemoryStream? _memory;
     private FileStream? _file;
 
     public long Length { get; private set; }
+
+    /// <summary>Reserves memory for a body of the expected size (Content-Length), so the buffer does not grow by copying.</summary>
+    public void Reserve(long expected)
+    {
+        if (_file is null && Length == 0 && expected > 0 && expected <= inMemoryLimit)
+        {
+            _memory ??= new MemoryStream((int)expected);
+            if (_memory.Capacity < expected)
+            {
+                _memory.Capacity = (int)expected;
+            }
+        }
+    }
 
     public void Write(ReadOnlySpan<byte> data)
     {
@@ -18,7 +31,8 @@ internal sealed class BodyBuffer(long inMemoryLimit, string? tempDirectory) : ID
             return;
         }
 
-        if (_file is null && _memory!.Length + data.Length > inMemoryLimit)
+        _memory ??= new MemoryStream();
+        if (_file is null && _memory.Length + data.Length > inMemoryLimit)
         {
             var dir = string.IsNullOrEmpty(tempDirectory) ? Path.GetTempPath() : tempDirectory;
             var path = Path.Combine(dir, "pondhawk-waf-" + Guid.NewGuid().ToString("N"));
@@ -41,11 +55,15 @@ internal sealed class BodyBuffer(long inMemoryLimit, string? tempDirectory) : ID
         Length += data.Length;
     }
 
-    public byte[] ReadAll()
+    /// <summary>
+    /// The buffered bytes. In memory: a view of the buffer, valid until the next write or dispose. Spilled to a file:
+    /// a new array.
+    /// </summary>
+    public ReadOnlyMemory<byte> ReadAll()
     {
         if (_file is null)
         {
-            return _memory!.ToArray();
+            return _memory is null ? ReadOnlyMemory<byte>.Empty : _memory.GetBuffer().AsMemory(0, (int)_memory.Length);
         }
 
         var result = new byte[_file.Length];

@@ -15,7 +15,9 @@ namespace Pondhawk.Waf;
 /// </summary>
 public sealed class Transaction : IDisposable
 {
-    private readonly TransformationCache _transformationCache = new();
+    private static readonly string[] CaptureKeys = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+    private EvaluationScratch? _scratch;
     private readonly HashSet<int> _removedRuleIds = [];
     private readonly List<(int Start, int End)> _removedRuleRanges = [];
     private readonly Dictionary<int, List<(Variable Variable, VariableException Exception)>> _removedTargets = [];
@@ -42,7 +44,7 @@ public sealed class Transaction : IDisposable
         var v = Variables;
         for (var i = 0; i <= 10; i++)
         {
-            v.Tx.Set(i.ToString(CultureInfo.InvariantCulture), string.Empty);
+            v.Tx.Set(i < CaptureKeys.Length ? CaptureKeys[i] : "10", string.Empty);
         }
 
         v.FilesCombinedSize.Set("0");
@@ -118,6 +120,9 @@ public sealed class Transaction : IDisposable
     public bool IsRelevantForAudit => _audit;
 
     internal bool Capturing { get; set; }
+
+    /// <summary>Matches and audit entries of this transaction are not logged (engine warm-up).</summary>
+    internal bool SuppressLogs { get; set; }
 
     internal string SkipAfter { get; set; } = string.Empty;
 
@@ -580,6 +585,24 @@ public sealed class Transaction : IDisposable
         return (Interruption, (int)writing);
     }
 
+    /// <summary>
+    /// The response body bytes buffered for phase 4. A host that holds the response until phase 4 sends these to the
+    /// client instead of keeping a copy of its own. Valid until the next <see cref="WriteResponseBody"/> or dispose.
+    /// </summary>
+    public ReadOnlyMemory<byte> BufferedResponseBody => _responseBody.ReadAll();
+
+    /// <summary>
+    /// Reserves buffer memory for a response body of the expected length (the application's Content-Length), up to the
+    /// limit. Not offered for requests: a client could declare a length and send nothing.
+    /// </summary>
+    public void ReserveResponseBody(long expectedLength)
+    {
+        if (!IsRuleEngineOff && ResponseBodyAccess)
+        {
+            _responseBody.Reserve(Math.Min(expectedLength, ResponseBodyLimit));
+        }
+    }
+
     /// <summary>Runs phase 4. Call after ProcessResponseHeaders and after all body bytes were written.</summary>
     public Interruption? ProcessResponseBody()
     {
@@ -609,7 +632,7 @@ public sealed class Transaction : IDisposable
 
         var body = ResponseBodyAsUtf8(_responseBody.ReadAll());
         // RESPONSE_BODY is set with or without a body processor: the data leakage rules (950-956) read it.
-        Variables.ResponseBody.Set(ByteString.FromBytes(body));
+        Variables.ResponseBody.Set(ByteString.FromBytes(body.Span));
         Variables.ResponseContentLength.Set(body.Length.ToString(CultureInfo.InvariantCulture));
         var processor = Variables.ResBodyProcessor.Value;
         if (processor.Length > 0)
@@ -633,7 +656,7 @@ public sealed class Transaction : IDisposable
 
     // Rules match bytes of ASCII-compatible text. A UTF-16 or UTF-32 body (Content-Type charset or BOM, which the client
     // can request with Accept-Charset) is transcoded to UTF-8 for inspection; the client still gets the original.
-    private byte[] ResponseBodyAsUtf8(byte[] body)
+    private ReadOnlyMemory<byte> ResponseBodyAsUtf8(ReadOnlyMemory<byte> body)
     {
         var contentType = Variables.ResponseHeaders.GetFirst("content-type") ?? string.Empty;
         var charset = string.Empty;
@@ -655,7 +678,7 @@ public sealed class Transaction : IDisposable
             _ => null,
         };
 
-        var span = body.AsSpan();
+        var span = body.Span;
         if (span.StartsWith((ReadOnlySpan<byte>)[0xFF, 0xFE, 0x00, 0x00]))
         {
             encoding = System.Text.Encoding.UTF32;
@@ -673,7 +696,7 @@ public sealed class Transaction : IDisposable
             encoding = System.Text.Encoding.BigEndianUnicode;
         }
 
-        return encoding is null ? body : System.Text.Encoding.UTF8.GetBytes(encoding.GetString(body));
+        return encoding is null ? body : System.Text.Encoding.UTF8.GetBytes(encoding.GetString(span));
     }
 
     private void ResponseBodyError(string message)
@@ -706,7 +729,7 @@ public sealed class Transaction : IDisposable
         }
 
         Variables.Duration.Set(((long)(DateTimeOffset.UtcNow - _started).TotalMicroseconds).ToString(CultureInfo.InvariantCulture));
-        if (AuditEngine == AuditEngineMode.Off || Waf.Config.AuditLogWriter is null)
+        if (AuditEngine == AuditEngineMode.Off || Waf.Config.AuditLogWriter is null || SuppressLogs)
         {
             return;
         }
@@ -732,6 +755,10 @@ public sealed class Transaction : IDisposable
     {
         _requestBody.Dispose();
         _responseBody.Dispose();
+        if (Interlocked.Exchange(ref _scratch, null) is { } scratch)
+        {
+            Waf.ScratchPool.Return(scratch);
+        }
     }
 
     // ----- Rule engine hooks -----
@@ -761,9 +788,20 @@ public sealed class Transaction : IDisposable
     {
         if (Capturing)
         {
-            Variables.Tx.Set(index.ToString(CultureInfo.InvariantCulture), value);
+            Variables.Tx.Set((uint)index < CaptureKeys.Length ? CaptureKeys[index] : index.ToString(CultureInfo.InvariantCulture), value);
         }
     }
+
+    // Working memory for rule evaluation, rented from the engine's pool on first use and returned on dispose.
+    private EvaluationScratch Scratch => _scratch ??= Waf.ScratchPool.Rent();
+
+    internal List<MatchData> RentMatchList() => Scratch.RentMatchList();
+
+    internal List<string> RentStringList() => Scratch.RentStringList();
+
+    internal void Return(List<MatchData> list) => Scratch.Return(list);
+
+    internal void Return(List<string> list) => Scratch.Return(list);
 
     internal void MatchVariable(MatchData match)
     {
@@ -807,7 +845,7 @@ public sealed class Transaction : IDisposable
         var matched = new MatchedRule(
             rule,
             Id,
-            LogRedaction.RedactQuery(Variables.RequestUri.Value),
+            RedactedUri(),
             Variables.RemoteAddr.Value,
             Variables.ServerName.Value.Length > 0 ? Variables.ServerName.Value : Variables.RequestHeaders.GetFirst("host") ?? string.Empty,
             message,
@@ -816,7 +854,7 @@ public sealed class Transaction : IDisposable
             disruptiveName,
             disruptiveName is not null and not "pass" && RuleEngine == RuleEngineMode.On);
         _matchedRules.Add(matched);
-        if (rule.Log && Waf.Config.ErrorCallback is { } callback)
+        if (rule.Log && !SuppressLogs && Waf.Config.ErrorCallback is { } callback)
         {
             try
             {
@@ -829,6 +867,21 @@ public sealed class Transaction : IDisposable
                 Waf.RecordLogFailure();
             }
         }
+    }
+
+    // The request URI for logs, redacted once per transaction (every matched rule records it).
+    private (string Source, string Redacted)? _redactedUri;
+
+    private string RedactedUri()
+    {
+        var uri = Variables.RequestUri.Value;
+        if (_redactedUri is not { } cached || !ReferenceEquals(cached.Source, uri))
+        {
+            cached = (uri, LogRedaction.RedactQuery(uri));
+            _redactedUri = cached;
+        }
+
+        return cached.Redacted;
     }
 
     internal void RemoveRuleById(int id) => _removedRuleIds.Add(id);
@@ -926,7 +979,8 @@ public sealed class Transaction : IDisposable
     private void Eval(int phase)
     {
         LastPhase = phase;
-        _transformationCache.Clear();
+        var cache = Scratch.Cache;
+        cache.Clear();
         if (phase == Phases.Logging && AllowType == AllowType.All)
         {
             AllowType = AllowType.Unset;
@@ -998,7 +1052,7 @@ public sealed class Transaction : IDisposable
                 Variables.MatchedVars.Reset();
             }
 
-            rule.Evaluate(phase, this, _transformationCache);
+            rule.Evaluate(phase, this, cache);
             Capturing = false;
 
             if (IsRuleEngineOff)

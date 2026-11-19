@@ -114,6 +114,9 @@ public sealed class WafEngineProvider : IDisposable
                 options = _factory.Create(Options.DefaultName);
                 var settings = options.Resolve();
                 var engine = WafServiceCollectionExtensions.CreateEngine(options, _loggerFactory, _metrics);
+
+                // Swap in a fully built engine, so requests after a reload do not wait for regex automata.
+                await engine.Compiled.ConfigureAwait(false);
                 snapshot = new WafSnapshot(engine, options, settings, Interlocked.Increment(ref _generation));
             }
 #pragma warning disable CA1031 // Any build failure keeps the running engine.

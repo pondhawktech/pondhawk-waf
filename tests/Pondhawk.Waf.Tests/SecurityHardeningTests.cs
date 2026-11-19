@@ -459,9 +459,13 @@ public sealed class SecurityHardeningTests
     {
         var cache = new Rules.TransformationCache();
         var big = new string('a', (int)(Rules.TransformationCache.MaxChars / 2) + 1);
-        cache.Add((1, "x"), big);
-        cache.Add((2, "x"), big);
+        cache.Add(1, "x", big);
+        cache.Add(2, "x", big);
         Assert.Equal(1, cache.Count);
+
+        // A transformation that changed nothing returns its input: caching it costs nothing.
+        cache.Add(3, big, big);
+        Assert.Equal(2, cache.Count);
     }
 
     // ----- Helpers -----

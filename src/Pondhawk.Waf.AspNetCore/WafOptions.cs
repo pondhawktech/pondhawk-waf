@@ -136,7 +136,16 @@ public sealed class WafOptions
     public Func<HttpContext, bool>? Bypass { get; set; }
 
     /// <summary>
-    /// Run synthetic requests at startup so the first real requests do not pay for regex compilation. Default true.
+    /// In DetectionOnly, hold inspected response bodies until phase 4 as SecRuleEngine On does. Default false: a response
+    /// that cannot be blocked streams to the client as it is written, and a copy is inspected. Turn it on to measure
+    /// the latency and memory that switching to On will add.
+    /// </summary>
+    public bool HoldResponsesInDetectionOnly { get; set; }
+
+    /// <summary>
+    /// After the regex automata are built (in the background, see <see cref="WafEngine.Compiled"/>), run synthetic
+    /// requests so the first real requests do not pay for building DFA states. Runs in the background; startup does not
+    /// wait. Default true.
     /// </summary>
     public bool WarmUp { get; set; } = true;
 

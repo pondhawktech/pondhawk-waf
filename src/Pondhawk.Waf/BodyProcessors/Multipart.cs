@@ -8,7 +8,7 @@ namespace Pondhawk.Waf.BodyProcessors;
 
 internal static class Multipart
 {
-    public static void Process(byte[] body, Transaction tx, BodyProcessorOptions options)
+    public static void Process(ReadOnlySpan<byte> body, Transaction tx, BodyProcessorOptions options)
     {
         var v = tx.Variables;
         if (!MediaType.TryParse(ByteString.FromUtf16(options.ContentType), out var mediaType, out var parameters))

@@ -10,8 +10,11 @@ namespace Pondhawk.Waf.AspNetCore;
 /// <list type="bullet">
 /// <item>Phase 3 (response headers) runs when the application starts the response: first write, StartAsync,
 /// CompleteAsync, or return without a body.</item>
-/// <item>Inspectable bodies (SecResponseBodyAccess On, MIME type listed, not compressed) are held in memory up to
-/// SecResponseBodyLimit; phase 4 runs before any byte is sent, so a match can still replace the response.</item>
+/// <item>Inspectable bodies (SecResponseBodyAccess On, MIME type listed, not compressed) are held up to
+/// SecResponseBodyLimit; phase 4 runs before any byte is sent, so a match can still replace the response. The bytes are
+/// held once, in the transaction's buffer, and sent from there.</item>
+/// <item>In DetectionOnly, which cannot block, inspectable bodies stream to the client as they are written and a copy
+/// goes to the transaction for phase 4 (unless <see cref="WafOptions.HoldResponsesInDetectionOnly"/>).</item>
 /// <item>Other bodies run phase 4 without the body, then stream through unchanged.</item>
 /// </list>
 /// </summary>
@@ -20,22 +23,35 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     private readonly HttpContext _context;
     private readonly Transaction _tx;
     private readonly IHttpResponseBodyFeature _inner;
-    private readonly MemoryStream _held = new();
+    private readonly bool _holdInDetectionOnly;
     private PipeWriter? _writer;
     private State _state = State.NotStarted;
 
-    public ResponseInspector(HttpContext context, Transaction tx, IHttpResponseBodyFeature inner)
+    // Held bytes (in the transaction's buffer) not yet sent.
+    private bool _heldPending;
+
+    public ResponseInspector(HttpContext context, Transaction tx, IHttpResponseBodyFeature inner, bool holdInDetectionOnly = false)
     {
         _context = context;
         _tx = tx;
         _inner = inner;
+        _holdInDetectionOnly = holdInDetectionOnly;
     }
 
     private enum State
     {
         NotStarted,
+
+        /// <summary>Bytes are held for phase 4.</summary>
         Holding,
+
+        /// <summary>Bytes go to the client and a copy to phase 4 (DetectionOnly).</summary>
+        Streaming,
+
+        /// <summary>Phase 4 ran; bytes go to the client uninspected.</summary>
         PassThrough,
+
+        /// <summary>Phase 3 or 4 interrupted; bytes are dropped and the middleware writes the error response.</summary>
         Blocked,
     }
 
@@ -62,7 +78,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
             _state = Interruption is null ? State.PassThrough : State.Blocked;
         }
 
-        if (_state == State.PassThrough)
+        if (_state is State.PassThrough or State.Streaming)
         {
             _inner.DisableBuffering();
         }
@@ -71,7 +87,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         BeginResponse();
-        if (_state == State.PassThrough)
+        if (_state is State.PassThrough or State.Streaming)
         {
             await _inner.StartAsync(cancellationToken);
         }
@@ -121,13 +137,20 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
                 FlushHeld();
                 _inner.Stream.Write(buffer);
                 break;
+            case State.Streaming:
+                Copy(buffer);
+                if (_state != State.Blocked)
+                {
+                    _inner.Stream.Write(buffer);
+                }
+
+                break;
             case State.Holding:
-                var rest = Hold(buffer);
+                var written = Hold(buffer);
                 if (_state == State.PassThrough)
                 {
-                    _inner.Stream.Write(_held.GetBuffer().AsSpan(0, (int)_held.Length));
-                    _held.SetLength(0);
-                    _inner.Stream.Write(rest.Span);
+                    FlushHeld();
+                    _inner.Stream.Write(buffer[written..]);
                 }
 
                 break;
@@ -146,12 +169,20 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
                 await FlushHeldAsync(cancellationToken);
                 await _inner.Stream.WriteAsync(buffer, cancellationToken);
                 break;
+            case State.Streaming:
+                Copy(buffer.Span);
+                if (_state != State.Blocked)
+                {
+                    await _inner.Stream.WriteAsync(buffer, cancellationToken);
+                }
+
+                break;
             case State.Holding:
-                var rest = Hold(buffer.Span, buffer);
+                var written = Hold(buffer.Span);
                 if (_state == State.PassThrough)
                 {
                     await FlushHeldAsync(cancellationToken);
-                    await _inner.Stream.WriteAsync(rest, cancellationToken);
+                    await _inner.Stream.WriteAsync(buffer[written..], cancellationToken);
                 }
 
                 break;
@@ -160,7 +191,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
 
     public override void Flush()
     {
-        if (_state == State.PassThrough)
+        if (_state is State.PassThrough or State.Streaming)
         {
             FlushHeld();
             _inner.Stream.Flush();
@@ -169,7 +200,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
 
     public override async Task FlushAsync(CancellationToken cancellationToken)
     {
-        if (_state == State.PassThrough)
+        if (_state is State.PassThrough or State.Streaming)
         {
             await FlushHeldAsync(cancellationToken);
             await _inner.Stream.FlushAsync(cancellationToken);
@@ -192,11 +223,12 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         }
 
         BeginResponse();
-        if (_state == State.Holding)
+        if (_state is State.Holding or State.Streaming)
         {
             Interruption = _tx.ProcessResponseBody();
             if (Interruption is not null)
             {
+                // Streaming: bytes already sent; the middleware aborts the connection.
                 _state = State.Blocked;
                 return;
             }
@@ -206,17 +238,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         }
     }
 
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            _held.Dispose();
-        }
-
-        base.Dispose(disposing);
-    }
-
-    // Phase 3, once, when the response starts. Decides whether the body is held for phase 4 or streamed.
+    // Phase 3, once, when the response starts. Decides whether the body is held, streamed with a copy, or streamed.
     private void BeginResponse()
     {
         if (_state != State.NotStarted)
@@ -243,7 +265,13 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
 
         if (CanInspectBody(response))
         {
-            _state = State.Holding;
+            if (response.ContentLength is { } length)
+            {
+                _tx.ReserveResponseBody(length);
+            }
+
+            // DetectionOnly cannot replace the response, so there is nothing to hold it for.
+            _state = _tx.RuleEngine == RuleEngineMode.DetectionOnly && !_holdInDetectionOnly ? State.Streaming : State.Holding;
             return;
         }
 
@@ -265,44 +293,58 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         return encoding.Count == 0 || encoding.All(e => string.IsNullOrEmpty(e) || e.Equals("identity", StringComparison.OrdinalIgnoreCase));
     }
 
-    // Holds bytes for phase 4. Returns the bytes not accepted (ProcessPartial at the limit); the state then becomes
-    // PassThrough, or Blocked when phase 4 interrupted.
-    private ReadOnlyMemory<byte> Hold(ReadOnlySpan<byte> data, ReadOnlyMemory<byte> memory = default)
+    // Holds bytes in the transaction's buffer for phase 4. Returns how many were accepted; at the limit (ProcessPartial)
+    // phase 4 has run on the held bytes and the state becomes PassThrough, or Blocked when phase 4 interrupted.
+    private int Hold(ReadOnlySpan<byte> data)
     {
         var (interruption, written) = _tx.WriteResponseBody(data);
-        _held.Write(data[..written]);
+        _heldPending |= written > 0;
         if (interruption is not null)
         {
             Interruption = interruption;
             _state = State.Blocked;
-            return ReadOnlyMemory<byte>.Empty;
+            return data.Length;
         }
 
         if (written < data.Length)
         {
-            // The limit was reached and phase 4 ran on the first bytes (ProcessPartial): send the rest unseen.
             _state = State.PassThrough;
-            return memory.IsEmpty ? data[written..].ToArray() : memory[written..];
         }
 
-        return ReadOnlyMemory<byte>.Empty;
+        return written;
+    }
+
+    // Streaming: copies bytes to the transaction for phase 4. Past the limit phase 4 has run on what was copied and
+    // the rest streams uninspected. Interrupts only if a rule switched the transaction to On (ctl:ruleEngine).
+    private void Copy(ReadOnlySpan<byte> data)
+    {
+        var (interruption, written) = _tx.WriteResponseBody(data);
+        if (interruption is not null)
+        {
+            Interruption = interruption;
+            _state = State.Blocked;
+        }
+        else if (written < data.Length)
+        {
+            _state = State.PassThrough;
+        }
     }
 
     private void FlushHeld()
     {
-        if (_held.Length > 0)
+        if (_heldPending)
         {
-            _inner.Stream.Write(_held.GetBuffer().AsSpan(0, (int)_held.Length));
-            _held.SetLength(0);
+            _heldPending = false;
+            _inner.Stream.Write(_tx.BufferedResponseBody.Span);
         }
     }
 
     private async Task FlushHeldAsync(CancellationToken cancellationToken)
     {
-        if (_held.Length > 0)
+        if (_heldPending)
         {
-            await _inner.Stream.WriteAsync(_held.GetBuffer().AsMemory(0, (int)_held.Length), cancellationToken);
-            _held.SetLength(0);
+            _heldPending = false;
+            await _inner.Stream.WriteAsync(_tx.BufferedResponseBody, cancellationToken);
         }
     }
 }

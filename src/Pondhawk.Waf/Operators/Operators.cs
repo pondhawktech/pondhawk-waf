@@ -27,7 +27,7 @@ public static class OperatorRegistry
     private static readonly FrozenDictionary<string, Func<OperatorOptions, IOperator>> Factories =
         new Dictionary<string, Func<OperatorOptions, IOperator>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["rx"] = o => new RxOperator(o.RegexCache.Get(o.Arguments), RegexCache.UsesWordBoundary(o.Arguments)),
+            ["rx"] = o => new RxOperator(o.RegexCache.GetDeferred(o.Arguments), RegexCache.UsesWordBoundary(o.Arguments), o.RegexCache.GetPrefilter(o.Arguments)),
             ["pm"] = o => new PmOperator(o.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)),
             ["pmFromFile"] = o => new PmOperator(ReadDataFile(o)),
             ["pmf"] = o => new PmOperator(ReadDataFile(o)),
@@ -127,7 +127,7 @@ public sealed class RegexCache
 {
     private const string MaxAutomataSizeSwitch = "REGEX_NONBACKTRACKING_MAX_AUTOMATA_SIZE";
 
-    private readonly Dictionary<string, Regex> _cache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Lazy<Regex>> _cache = new(StringComparer.Ordinal);
 
     static RegexCache()
     {
@@ -142,42 +142,87 @@ public sealed class RegexCache
     /// <summary>Use the linear-time NonBacktracking engine when the pattern allows it. Default true.</summary>
     public bool PreferNonBacktracking { get; init; } = true;
 
+    /// <summary>Skip @rx evaluation when a value lacks a literal every match needs (see <see cref="RegexPrefilter"/>). Default true.</summary>
+    public bool UsePrefilter { get; init; } = true;
+
+    private readonly Dictionary<string, RegexPrefilter?> _prefilters = new(StringComparer.Ordinal);
+
+    /// <summary>The prefilter for a SecLang pattern, or null.</summary>
+    internal RegexPrefilter? GetPrefilter(string pattern)
+    {
+        if (!UsePrefilter)
+        {
+            return null;
+        }
+
+        lock (_prefilters)
+        {
+            if (!_prefilters.TryGetValue(pattern, out var prefilter))
+            {
+                prefilter = RegexPrefilter.Create(pattern);
+                _prefilters[pattern] = prefilter;
+            }
+
+            return prefilter;
+        }
+    }
+
     /// <summary>Timeout for patterns that need the backtracking engine.</summary>
     public TimeSpan BacktrackingTimeout { get; init; } = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// Compiles a SecLang (RE2/PCRE syntax) pattern as Coraza does: with (?s) and (?m).
     /// </summary>
-    public Regex Get(string pattern)
+    public Regex Get(string pattern) => GetDeferred(pattern).Value;
+
+    /// <summary>
+    /// Like <see cref="Get"/>, but builds the regex on first use. Building the NonBacktracking automata of CRS takes
+    /// seconds; <see cref="CompileAll"/> builds the deferred ones in the background after the rules load. The syntax is
+    /// checked now (a few milliseconds for all of CRS), so an invalid pattern still fails the configuration.
+    /// </summary>
+    internal Lazy<Regex> GetDeferred(string pattern)
     {
         lock (_cache)
         {
-            if (_cache.TryGetValue(pattern, out var cached))
+            if (!_cache.TryGetValue(pattern, out var cached))
             {
-                return cached;
+                const RegexOptions options = RegexOptions.Singleline | RegexOptions.Multiline;
+                _ = new Regex(TranslatePattern(pattern), RegexOptions.CultureInvariant | options);
+                cached = new Lazy<Regex>(() => Compile(pattern, options), LazyThreadSafetyMode.ExecutionAndPublication);
+                _cache[pattern] = cached;
             }
 
-            var regex = Compile(pattern, RegexOptions.Singleline | RegexOptions.Multiline);
-            _cache[pattern] = regex;
-            return regex;
+            return cached;
         }
+    }
+
+    /// <summary>Builds every deferred regex, in parallel. A regex in use before this reaches it is built by its user.</summary>
+    internal void CompileAll()
+    {
+        Lazy<Regex>[] pending;
+        lock (_cache)
+        {
+            pending = [.. _cache.Values.Where(l => !l.IsValueCreated)];
+        }
+
+        Parallel.ForEach(pending, lazy => _ = lazy.Value);
     }
 
     /// <summary>Compiles a pattern without the SecLang default flags (used for collection key selectors).</summary>
     public Regex GetPlain(string pattern)
     {
         var key = "\0plain\0" + pattern;
+        Lazy<Regex>? cached;
         lock (_cache)
         {
-            if (_cache.TryGetValue(key, out var cached))
+            if (!_cache.TryGetValue(key, out cached))
             {
-                return cached;
+                cached = new Lazy<Regex>(() => Compile(pattern, RegexOptions.None), LazyThreadSafetyMode.ExecutionAndPublication);
+                _cache[key] = cached;
             }
-
-            var regex = Compile(pattern, RegexOptions.None);
-            _cache[key] = regex;
-            return regex;
         }
+
+        return cached.Value;
     }
 
     private Regex Compile(string pattern, RegexOptions extra)
@@ -190,13 +235,22 @@ public sealed class RegexCache
             {
                 return new Regex(translated, options | RegexOptions.NonBacktracking);
             }
-            catch (NotSupportedException)
+            catch (Exception ex) when (ex is not RegexParseException)
             {
-                // Lookarounds, backreferences or atomic groups: fall back to the backtracking engine with a timeout.
+                // Lookarounds, backreferences, atomic groups or an automaton over the size limit (NotSupportedException):
+                // fall back to the backtracking engine with a timeout.
             }
         }
 
-        return new Regex(translated, options | RegexOptions.Compiled, BacktrackingTimeout);
+        try
+        {
+            return new Regex(translated, options | RegexOptions.Compiled, BacktrackingTimeout);
+        }
+        catch (Exception ex) when (ex is not RegexParseException)
+        {
+            // The syntax was checked when the rule loaded; never fail a request over code generation.
+            return new Regex(translated, options, BacktrackingTimeout);
+        }
     }
 
     /// <summary>
@@ -421,12 +475,37 @@ public sealed class RegexCache
     };
 }
 
-internal sealed class RxOperator(Regex regex, bool remapHighBytes = false) : IOperator
+internal sealed class RxOperator(Lazy<Regex> regex, bool remapHighBytes = false, RegexPrefilter? prefilter = null) : IOperator
 {
-    public Regex Regex { get; } = regex;
+    public RxOperator(Regex regex, bool remapHighBytes = false, RegexPrefilter? prefilter = null)
+        : this(new Lazy<Regex>(regex), remapHighBytes, prefilter)
+    {
+    }
+
+    public Regex Regex => regex.Value;
+
+    /// <summary>The deferred regex, compiled when the rules are loaded (see <see cref="RegexCache.CompileAll"/>).</summary>
+    internal Lazy<Regex> DeferredRegex => regex;
+
+    /// <summary>Tests only: called for every value the prefilter rejects, to check that the regex does not match it.</summary>
+    internal static Action<RxOperator, string>? VerifyPrefilter { get; set; }
+
+    /// <summary>The prefilter, or null when the pattern has none or prefiltering is off.</summary>
+    internal RegexPrefilter? Prefilter { get; } = prefilter;
 
     public bool Evaluate(Transaction tx, string value)
     {
+        // The prefilter reads ASCII literals only, which high-byte remapping leaves in place.
+        if (Prefilter is not null && !Prefilter.MightMatch(value))
+        {
+            if (VerifyPrefilter is { } verify)
+            {
+                verify(this, value);
+            }
+
+            return false;
+        }
+
         var input = remapHighBytes ? RegexCache.RemapHighBytes(value) : value;
         if (!tx.Capturing)
         {
@@ -448,11 +527,28 @@ internal sealed class RxOperator(Regex regex, bool remapHighBytes = false) : IOp
 
         return true;
     }
+
+    /// <summary>Whether the regex matches the value, without the prefilter or captures.</summary>
+    internal bool RegexMatches(string value) => Regex.IsMatch(remapHighBytes ? RegexCache.RemapHighBytes(value) : value);
 }
 
-internal sealed class PmOperator(IEnumerable<string> patterns) : IOperator
+internal sealed class PmOperator : IOperator
 {
-    private readonly AhoCorasick _matcher = new(patterns);
+    private readonly AhoCorasick _matcher;
+
+    // Vectorized search for the common case of ASCII patterns. No byte 0x80-0xFF case-folds to an ASCII letter, so
+    // OrdinalIgnoreCase finds exactly what the ASCII-folding Aho-Corasick automaton finds.
+    private readonly System.Buffers.SearchValues<string>? _any;
+
+    public PmOperator(IEnumerable<string> patterns)
+    {
+        var list = patterns as IReadOnlyCollection<string> ?? [.. patterns];
+        _matcher = new AhoCorasick(list);
+        if (!_matcher.MatchesEmpty && list.Count > 0 && list.All(p => Ascii.IsValid(p)))
+        {
+            _any = System.Buffers.SearchValues.Create([.. list.Distinct(StringComparer.OrdinalIgnoreCase)], StringComparison.OrdinalIgnoreCase);
+        }
+    }
 
     public bool Evaluate(Transaction tx, string value)
     {
@@ -461,12 +557,24 @@ internal sealed class PmOperator(IEnumerable<string> patterns) : IOperator
             return false;
         }
 
-        if (!tx.Capturing)
+        if (_any is not null)
+        {
+            if (!value.AsSpan().ContainsAny(_any))
+            {
+                return false;
+            }
+
+            if (!tx.Capturing)
+            {
+                return true;
+            }
+        }
+        else if (!tx.Capturing)
         {
             return _matcher.IsMatch(value);
         }
 
-        var matches = _matcher.FindAll(value, 10);
+        var matches = _matcher.FindAll(value, 10, _any);
         for (var i = 0; i < matches.Count; i++)
         {
             tx.CaptureField(i, matches[i]);

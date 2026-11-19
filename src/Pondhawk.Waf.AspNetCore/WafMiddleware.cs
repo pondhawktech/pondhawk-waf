@@ -48,7 +48,7 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvide
             // Upgraded connections (WebSocket) bypass the body feature, so the wrapper only sees normal responses.
             // Do not skip on request headers: a client could send "Connection: Upgrade" to avoid inspection.
             var inner = context.Features.GetRequiredFeature<IHttpResponseBodyFeature>();
-            using var inspector = new ResponseInspector(context, tx, inner);
+            using var inspector = new ResponseInspector(context, tx, inner, snapshot.Options.HoldResponsesInDetectionOnly);
             context.Features.Set<IHttpResponseBodyFeature>(inspector);
             try
             {

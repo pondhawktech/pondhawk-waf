@@ -103,6 +103,15 @@ public sealed class Macro
             return ExpandToken(tx, _tokens[0]);
         }
 
+        if (_tokens.Length <= 4)
+        {
+            return string.Concat(
+                ExpandToken(tx, _tokens[0]),
+                ExpandToken(tx, _tokens[1]),
+                _tokens.Length > 2 ? ExpandToken(tx, _tokens[2]) : null,
+                _tokens.Length > 3 ? ExpandToken(tx, _tokens[3]) : null);
+        }
+
         var sb = new StringBuilder();
         foreach (var t in _tokens)
         {
@@ -125,13 +134,17 @@ public sealed class Macro
         {
             case SingleCollection single:
                 return single.Value;
+            case MapCollection map when token.Key.Length > 0:
+                return map.GetFirst(token.Key) ?? string.Empty;
             case IKeyedCollection keyed when token.Key.Length > 0:
                 var values = keyed.Get(token.Key);
                 return values.Count > 0 ? values[0] : string.Empty;
             case { } col:
-                var list = new List<MatchData>();
+                var list = tx.RentMatchList();
                 col.FindAll(list);
-                return list.Count > 0 ? list[0].Value : string.Empty;
+                var first = list.Count > 0 ? list[0].Value : string.Empty;
+                tx.Return(list);
+                return first;
             default:
                 return string.Empty;
         }
