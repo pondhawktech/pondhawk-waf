@@ -140,6 +140,14 @@ public sealed class WafOptions
     /// </summary>
     public bool WarmUp { get; set; } = true;
 
+    /// <summary>
+    /// Rebuild the engine when the options change, for example when appsettings.json bound with
+    /// <c>AddPondhawkWaf(IConfiguration)</c> is edited. Requests in flight finish on the old engine; a configuration
+    /// that fails to build is logged and the old engine stays. Changes to <see cref="RuleFiles"/> on disk are not
+    /// watched. Default true.
+    /// </summary>
+    public bool ReloadOnChange { get; set; } = true;
+
     /// <summary>Configures the engine further after the options above are applied.</summary>
     public Action<WafBuilder>? Configure { get; set; }
 }
