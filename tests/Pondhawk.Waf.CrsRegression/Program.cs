@@ -46,72 +46,86 @@ const string TestingConfig = """
 var collected = new ConcurrentBag<int>();
 var done = new SemaphoreSlim(0);
 
-var builder = WebApplication.CreateSlimBuilder();
-builder.Logging.ClearProviders();
-builder.WebHost.UseKestrel(k =>
+// The CRS tests run without plugins (a plugin changes results on its application's paths); the plugin tests run on a
+// second server with every plugin loaded.
+WebApplication CreateApp(IEnumerable<Pondhawk.Waf.CoreRuleSet.CrsPlugin> plugins)
 {
-    k.Listen(IPAddress.Loopback, 0);
-    k.Limits.MaxRequestBodySize = 64 * 1024 * 1024;
-});
-builder.Services.AddPondhawkWaf(o =>
-{
-    o.Directives = TestingConfig;
-    o.Configure = b =>
+    var builder = WebApplication.CreateSlimBuilder();
+    builder.Logging.ClearProviders();
+    builder.WebHost.UseKestrel(k =>
     {
-        b.Config.ErrorCallback = m => collected.Add(m.Rule.LogId);
-        b.Config.AuditLogWriter = null;
-    };
-});
-
-var app = builder.Build();
-app.Use(async (ctx, next) =>
-{
-    try
+        k.Listen(IPAddress.Loopback, 0);
+        k.Limits.MaxRequestBodySize = 64 * 1024 * 1024;
+    });
+    builder.Services.AddPondhawkWaf(o =>
     {
-        await next(ctx);
-    }
-    finally
-    {
-        if (debug && ctx.Items[WafMiddleware.TransactionKey] is Transaction tx)
+        o.Directives = TestingConfig;
+        o.Plugins.AddRange(plugins);
+        o.Configure = b =>
         {
-            var v = tx.Variables;
-            Console.WriteLine($"  tx {tx.Id}: engine={tx.RuleEngine} lastPhase={tx.LastPhase} reqbodyProcessor={v.ReqbodyProcessor.Value} bodyLen={v.RequestBodyLength.Value} reqbodyError={v.ReqbodyErrorMsg.Value}");
-            Console.WriteLine($"  args: {string.Join(", ", Enumerable.Range(0, 1).SelectMany(_ => { var l = new List<Pondhawk.Waf.Collections.MatchData>(); v.Args.FindAll(l); return l.Select(m => m.Key + "=" + m.Value); }))}");
-            Console.WriteLine($"  matched: {string.Join(", ", tx.MatchedRules.Select(m => m.Rule.LogId + (m.Rule.Log ? "" : "(nolog)") + (m.Rule.LogId == 200000 ? "[" + string.Join(";", m.Matches.Select(x => x.Match.FullName + "=" + x.Match.Value)) + " op=" + m.Rule.OperatorData + "]" : "")))}");
-            { var hl = new List<Pondhawk.Waf.Collections.MatchData>(); v.RequestHeaders.FindAll(hl); Console.WriteLine("  headers: " + string.Join(" | ", hl.Select(x => x.Key + ": " + x.Value))); }
+            b.Config.ErrorCallback = m => collected.Add(m.Rule.LogId);
+            b.Config.AuditLogWriter = null;
+        };
+    });
+
+    var app = builder.Build();
+    app.Use(async (ctx, next) =>
+    {
+        try
+        {
+            await next(ctx);
+        }
+        finally
+        {
+            if (debug && ctx.Items[WafMiddleware.TransactionKey] is Transaction tx)
+            {
+                var v = tx.Variables;
+                Console.WriteLine($"  tx {tx.Id}: engine={tx.RuleEngine} lastPhase={tx.LastPhase} reqbodyProcessor={v.ReqbodyProcessor.Value} bodyLen={v.RequestBodyLength.Value} reqbodyError={v.ReqbodyErrorMsg.Value}");
+                Console.WriteLine($"  args: {string.Join(", ", Enumerable.Range(0, 1).SelectMany(_ => { var l = new List<Pondhawk.Waf.Collections.MatchData>(); v.Args.FindAll(l); return l.Select(m => m.Key + "=" + m.Value); }))}");
+                Console.WriteLine($"  matched: {string.Join(", ", tx.MatchedRules.Select(m => m.Rule.LogId + (m.Rule.Log ? "" : "(nolog)") + (m.Rule.LogId == 200000 ? "[" + string.Join(";", m.Matches.Select(x => x.Match.FullName + "=" + x.Match.Value)) + " op=" + m.Rule.OperatorData + "]" : "")))}");
+                { var hl = new List<Pondhawk.Waf.Collections.MatchData>(); v.RequestHeaders.FindAll(hl); Console.WriteLine("  headers: " + string.Join(" | ", hl.Select(x => x.Key + ": " + x.Value))); }
+            }
+
+            done.Release();
+        }
+    });
+    app.UsePondhawkWaf();
+    app.Run(async ctx =>
+    {
+        // Read the body as an application would, then answer like the albedo backend the CRS tests expect.
+        using var sink = new MemoryStream();
+        await ctx.Request.Body.CopyToAsync(sink);
+        ctx.Response.ContentType = "text/plain";
+        if (ctx.Request.Path == "/reflect" && sink.Length > 0)
+        {
+            await ReflectAsync(ctx, sink.ToArray());
+            return;
         }
 
-        done.Release();
-    }
-});
-app.UsePondhawkWaf();
-app.Run(async ctx =>
-{
-    // Read the body as an application would, then answer like the albedo backend the CRS tests expect.
-    using var sink = new MemoryStream();
-    await ctx.Request.Body.CopyToAsync(sink);
-    ctx.Response.ContentType = "text/plain";
-    if (ctx.Request.Path == "/reflect" && sink.Length > 0)
-    {
-        await ReflectAsync(ctx, sink.ToArray());
-        return;
-    }
-
-    await ctx.Response.WriteAsync("ok");
-});
+        await ctx.Response.WriteAsync("ok");
+    });
+    return app;
+}
 
 var sw = Stopwatch.StartNew();
+var app = CreateApp([]);
+var pluginApp = CreateApp(Enum.GetValues<Pondhawk.Waf.CoreRuleSet.CrsPlugin>());
 await app.StartAsync();
-Console.WriteLine($"WAF loaded and server started in {sw.ElapsedMilliseconds} ms");
-var address = new Uri(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First());
+await pluginApp.StartAsync();
+Console.WriteLine($"WAF loaded and servers started in {sw.ElapsedMilliseconds} ms");
+var address = ServerAddress(app);
+var pluginAddress = ServerAddress(pluginApp);
 
 var overrides = LoadOverrides(Path.Combine(baseDir, "coraza-overrides.yaml"));
-foreach (var (k, val) in LoadOverrides(Path.Combine(baseDir, "kestrel-overrides.yaml")))
+foreach (var (k, val) in LoadOverrides(Path.Combine(baseDir, "kestrel-overrides.yaml"))
+             .Concat(LoadOverrides(Path.Combine(baseDir, "plugin-overrides.yaml"))))
 {
     overrides[k] = val;
 }
 
-var files = Directory.GetFiles(Path.Combine(baseDir, "crs-tests"), "*.yaml", SearchOption.AllDirectories).Order(StringComparer.Ordinal).ToList();
+var files = Directory.GetFiles(Path.Combine(baseDir, "crs-tests"), "*.yaml", SearchOption.AllDirectories).Order(StringComparer.Ordinal)
+    .Concat(Directory.GetFiles(Path.Combine(baseDir, "plugin-tests"), "*.yaml", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+    .ToList();
 var deserializer = new DeserializerBuilder().Build();
 
 int pass = 0, fail = 0;
@@ -121,17 +135,27 @@ sw.Restart();
 foreach (var file in files)
 {
     var group = Path.GetFileName(Path.GetDirectoryName(file)!);
+    var isPlugin = file.Contains(Path.DirectorySeparatorChar + "plugin-tests" + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    if (isPlugin)
+    {
+        group = "plugin/" + group;
+    }
     var doc = deserializer.Deserialize<Dictionary<object, object>?>(File.ReadAllText(file));
-    if (doc is null || !doc.ContainsKey("rule_id") || !doc.ContainsKey("tests"))
+    if (doc is null || doc.GetValueOrDefault("tests") is not List<object>)
     {
         continue;
     }
 
-    var ruleId = Convert.ToInt32(doc["rule_id"], System.Globalization.CultureInfo.InvariantCulture);
+    // Older go-ftw tests have no rule_id; the file is named after the rule.
+    var ruleId = doc.TryGetValue("rule_id", out var rid)
+        ? Convert.ToInt32(rid, System.Globalization.CultureInfo.InvariantCulture)
+        : int.Parse(Path.GetFileNameWithoutExtension(file), System.Globalization.CultureInfo.InvariantCulture);
     foreach (Dictionary<object, object> test in (List<object>)doc["tests"])
     {
-        var testId = Convert.ToInt32(test["test_id"], System.Globalization.CultureInfo.InvariantCulture);
-        var name = $"{ruleId}-{testId}";
+        // Older go-ftw tests name each test with test_title ("9510100-1") instead of test_id.
+        var name = test.TryGetValue("test_id", out var tid)
+            ? $"{ruleId}-{Convert.ToInt32(tid, System.Globalization.CultureInfo.InvariantCulture)}"
+            : test["test_title"].ToString()!;
         if (filter is not null && (filter.EndsWith('$') ? name != filter[..^1] : !name.Contains(filter, StringComparison.Ordinal) && !group.Contains(filter, StringComparison.Ordinal)))
         {
             continue;
@@ -139,10 +163,14 @@ foreach (var file in files)
 
         var ok = true;
         var detail = new StringBuilder();
-        foreach (Dictionary<object, object> stage in (List<object>)test["stages"])
+        foreach (Dictionary<object, object> wrapped in (List<object>)test["stages"])
         {
+            // Older go-ftw tests wrap input and output in "stage".
+            var stage = wrapped.TryGetValue("stage", out var inner) && inner is Dictionary<object, object> innerStage ? innerStage : wrapped;
             var input = (Dictionary<object, object>)stage["input"];
-            var output = overrides.TryGetValue(name, out var o) ? o : (Dictionary<object, object>)stage["output"];
+            // A stage without output only prepares the next one; nothing is checked.
+            var output = overrides.TryGetValue(name, out var o) ? o
+                : stage.TryGetValue("output", out var so) && so is Dictionary<object, object> stageOutput ? stageOutput : [];
             var request = BuildRequest(input);
             collected.Clear();
             while (done.CurrentCount > 0)
@@ -150,7 +178,7 @@ foreach (var file in files)
                 await done.WaitAsync();
             }
 
-            var (status, error) = await SendAsync(address, request);
+            var (status, error) = await SendAsync(isPlugin ? pluginAddress : address, request);
             // Wait for the WAF to finish (logging phase runs after the response is sent).
             if (error is null || status > 0)
             {
@@ -209,7 +237,11 @@ if (reportPath is not null)
 }
 
 await app.StopAsync();
+await pluginApp.StopAsync();
 return fail == 0 ? 0 : 1;
+
+static Uri ServerAddress(WebApplication app) =>
+    new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First());
 
 static (bool Ok, string Why) Check(Dictionary<object, object> output, HashSet<int> ids, int status, string? error)
 {
@@ -257,6 +289,30 @@ static (bool Ok, string Why) Check(Dictionary<object, object> output, HashSet<in
             if (unexpected.Count > 0)
             {
                 why.Append($"unexpected [{string.Join(',', unexpected)}]; ");
+            }
+        }
+    }
+
+    // Regex checks against the log text, for patterns about rule ids only: each logged rule appears as [id "N"], as
+    // in a ModSecurity error log line. Patterns about messages or matched data are not checked. Older go-ftw tests put
+    // log_contains / no_log_contains directly under output.
+    var logText = string.Concat(ids.Order().Select(id => $"[id \"{id}\"] "));
+    var regexChecks = new (Dictionary<object, object>? Source, string Key, bool Expect)[]
+    {
+        (logObj as Dictionary<object, object>, "match_regex", true),
+        (logObj as Dictionary<object, object>, "no_match_regex", false),
+        (output, "log_contains", true),
+        (output, "no_log_contains", false),
+    };
+    foreach (var (source, key, expect) in regexChecks)
+    {
+        if (source is not null && source.TryGetValue(key, out var rx) && rx is string pattern
+            && pattern.Contains("id \"", StringComparison.Ordinal) && !pattern.Contains("msg", StringComparison.Ordinal))
+        {
+            checkedSomething = true;
+            if (System.Text.RegularExpressions.Regex.IsMatch(logText, pattern) != expect)
+            {
+                why.Append($"{key} '{pattern}' failed, got [{string.Join(',', ids.Order())}]; ");
             }
         }
     }

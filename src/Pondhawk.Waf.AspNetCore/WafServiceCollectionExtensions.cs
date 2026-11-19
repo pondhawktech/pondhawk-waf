@@ -104,6 +104,15 @@ public static class WafServiceCollectionExtensions
             exclusion.Validate();
         }
 
+        var plugins = options.Plugins.Distinct().ToList();
+        if (plugins.Count > 0 && !options.UseCoreRuleSet)
+        {
+            throw new InvalidOperationException("WafOptions.Plugins needs UseCoreRuleSet: the CRS plugins exclude CRS rules.");
+        }
+
+        // Plugin configuration before Directives, so a SecAction there overrides a plugin's default setting.
+        AddPluginStage(builder, plugins, CrsPluginStage.Config);
+
         if (!string.IsNullOrWhiteSpace(options.Directives))
         {
             builder.AddDirectives(options.Directives, Directory.GetCurrentDirectory());
@@ -124,7 +133,9 @@ public static class WafServiceCollectionExtensions
                 SecRule TX:detection_paranoia_level "@lt %{tx.blocking_paranoia_level}" \
                     "id:900002,phase:1,pass,t:none,nolog,setvar:'tx.detection_paranoia_level=%{tx.blocking_paranoia_level}'"
                 """);
+            AddPluginStage(builder, plugins, CrsPluginStage.Before);
             builder.AddDirectives(CoreRuleSetFiles.RuleDirectives);
+            AddPluginStage(builder, plugins, CrsPluginStage.After);
         }
 
         if (!string.IsNullOrWhiteSpace(options.DirectivesAfterRules))
@@ -158,6 +169,17 @@ public static class WafServiceCollectionExtensions
         }
 
         return waf;
+    }
+
+    private static void AddPluginStage(WafBuilder builder, List<CrsPlugin> plugins, CrsPluginStage stage)
+    {
+        foreach (var plugin in plugins)
+        {
+            if (CoreRuleSetFiles.PluginDirectives(plugin, stage) is { } include)
+            {
+                builder.AddDirectives(include);
+            }
+        }
     }
 }
 

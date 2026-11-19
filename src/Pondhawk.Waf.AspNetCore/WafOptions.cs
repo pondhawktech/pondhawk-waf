@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Http;
+using Pondhawk.Waf.CoreRuleSet;
 
 namespace Pondhawk.Waf.AspNetCore;
 
@@ -75,6 +76,12 @@ public sealed class WafOptions
         settings.Validate();
         return settings;
     }
+
+    /// <summary>
+    /// Official CRS rule exclusion plugins to load, for example <see cref="CrsPlugin.WordPress"/>. Each removes the
+    /// false positives of one application on that application's paths. Needs <see cref="UseCoreRuleSet"/>.
+    /// </summary>
+    public List<CrsPlugin> Plugins { get; } = [];
 
     /// <summary>
     /// Rule exclusions for false positives. Prefer the helpers (<see cref="RemoveRule"/>, <see cref="Exclude(int, string, string?)"/> and

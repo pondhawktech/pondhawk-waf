@@ -5,7 +5,8 @@ namespace Pondhawk.Waf.CoreRuleSet;
 
 /// <summary>
 /// The embedded OWASP Core Rule Set and the Pondhawk base configuration, exposed as a read-only file system:
-/// <c>pondhawk-waf.conf</c>, <c>crs-setup.conf.example</c> and <c>rules/*.conf</c> / <c>rules/*.data</c>.
+/// <c>pondhawk-waf.conf</c>, <c>crs-setup.conf.example</c>, <c>rules/*.conf</c> / <c>rules/*.data</c> and
+/// <c>plugins/*.conf</c>.
 /// </summary>
 public static class CoreRuleSetFiles
 {
@@ -28,6 +29,32 @@ public static class CoreRuleSetFiles
 
     /// <summary>The Pondhawk base configuration alone (engine settings and body processing), for use without CRS.</summary>
     public const string EngineDirectives = "Include pondhawk-waf.conf";
+
+    /// <summary>
+    /// The directive that loads one stage of a plugin (<c>Include plugins/wordpress-rule-exclusions-before.conf</c>),
+    /// or null when the plugin has no file for that stage. Load the stages as CRS does: every plugin's
+    /// <see cref="CrsPluginStage.Config"/> after the CRS setup, <see cref="CrsPluginStage.Before"/> before
+    /// <see cref="RuleDirectives"/>, <see cref="CrsPluginStage.After"/> after it.
+    /// </summary>
+    public static string? PluginDirectives(CrsPlugin plugin, CrsPluginStage stage)
+    {
+        var path = $"plugins/{PluginName(plugin)}-{stage.ToString().ToLowerInvariant()}.conf";
+        return Files.Value.ContainsKey(path) ? "Include " + path : null;
+    }
+
+    /// <summary>The plugin's name, as in its repository and file names: <c>wordpress-rule-exclusions</c>.</summary>
+    public static string PluginName(CrsPlugin plugin) => plugin switch
+    {
+        CrsPlugin.WordPress => "wordpress-rule-exclusions",
+        CrsPlugin.Drupal => "drupal-rule-exclusions",
+        CrsPlugin.Nextcloud => "nextcloud-rule-exclusions",
+        CrsPlugin.DokuWiki => "dokuwiki-rule-exclusions",
+        CrsPlugin.CPanel => "cpanel-rule-exclusions",
+        CrsPlugin.PhpBB => "phpbb-rule-exclusions",
+        CrsPlugin.PhpMyAdmin => "phpmyadmin-rule-exclusions",
+        CrsPlugin.XenForo => "xenforo-rule-exclusions",
+        _ => throw new ArgumentOutOfRangeException(nameof(plugin), plugin, "Unknown CRS plugin."),
+    };
 
     private static IReadOnlyDictionary<string, string> Load()
     {
