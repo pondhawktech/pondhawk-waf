@@ -76,6 +76,46 @@ public sealed class WafOptions
         return settings;
     }
 
+    /// <summary>
+    /// Rule exclusions for false positives. Prefer the helpers (<see cref="RemoveRule"/>, <see cref="Exclude(int, string, string?)"/> and
+    /// the others) in code; bind this list from configuration. Validated when the engine is built.
+    /// </summary>
+    public List<WafExclusion> Exclusions { get; } = [];
+
+    /// <summary>Turns off a rule for all requests, or for <paramref name="path"/> and the paths below it.</summary>
+    public WafOptions RemoveRule(int ruleId, string? path = null) =>
+        Add(new WafExclusion { Rule = ruleId.ToString(System.Globalization.CultureInfo.InvariantCulture), Path = path });
+
+    /// <summary>Turns off the rules <paramref name="firstRuleId"/> to <paramref name="lastRuleId"/> (inclusive).</summary>
+    public WafOptions RemoveRules(int firstRuleId, int lastRuleId, string? path = null) =>
+        Add(new WafExclusion { Rule = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{firstRuleId}-{lastRuleId}"), Path = path });
+
+    /// <summary>Turns off the rules with a tag, for example <c>attack-sqli</c>.</summary>
+    public WafOptions RemoveRulesByTag(string tag, string? path = null) =>
+        Add(new WafExclusion { Tag = tag, Path = path });
+
+    /// <summary>
+    /// Stops a rule from inspecting one target, for example <c>Exclude(942100, "ARGS:password", path: "/login")</c>.
+    /// The rule still inspects everything else.
+    /// </summary>
+    public WafOptions Exclude(int ruleId, string target, string? path = null) =>
+        Add(new WafExclusion { Rule = ruleId.ToString(System.Globalization.CultureInfo.InvariantCulture), Target = target, Path = path });
+
+    /// <summary>Stops the rules <paramref name="firstRuleId"/> to <paramref name="lastRuleId"/> from inspecting one target.</summary>
+    public WafOptions Exclude(int firstRuleId, int lastRuleId, string target, string? path = null) =>
+        Add(new WafExclusion { Rule = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{firstRuleId}-{lastRuleId}"), Target = target, Path = path });
+
+    /// <summary>Stops the rules with a tag from inspecting one target.</summary>
+    public WafOptions ExcludeByTag(string tag, string target, string? path = null) =>
+        Add(new WafExclusion { Tag = tag, Target = target, Path = path });
+
+    private WafOptions Add(WafExclusion exclusion)
+    {
+        exclusion.Validate();
+        Exclusions.Add(exclusion);
+        return this;
+    }
+
     /// <summary>SecLang loaded after the CRS setup and before the CRS rules: SecAction tuning, ctl-based exclusions.</summary>
     public string? Directives { get; set; }
 
