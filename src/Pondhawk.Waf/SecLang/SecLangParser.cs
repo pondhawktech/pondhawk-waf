@@ -129,12 +129,26 @@ internal sealed class SecLangParser(WafConfig config, IConfigFileSystem fs, Rege
         }
     }
 
+    private static bool HasUnescapedQuote(ReadOnlySpan<char> s)
+    {
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] == '"' && (i == 0 || s[i - 1] != '\\'))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private void EvaluateLine(string line)
     {
         var space = line.IndexOf(' ', StringComparison.Ordinal);
         var directive = (space < 0 ? line : line[..space]).ToLowerInvariant();
         var opts = space < 0 ? string.Empty : line[(space + 1)..];
-        if (opts.Length >= 3 && opts[0] == '"' && opts[^1] == '"')
+        // Strip the quotes around a single quoted argument, but not around two ("attack-sqli" "!ARGS:foo").
+        if (opts.Length >= 3 && opts[0] == '"' && opts[^1] == '"' && !HasUnescapedQuote(opts.AsSpan(1, opts.Length - 2)))
         {
             opts = opts.Trim('"');
         }

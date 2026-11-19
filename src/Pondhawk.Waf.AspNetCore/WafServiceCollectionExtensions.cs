@@ -99,9 +99,20 @@ public static class WafServiceCollectionExtensions
             builder.Config.RuleEngine = engine;
         }
 
+        foreach (var exclusion in options.Exclusions)
+        {
+            exclusion.Validate();
+        }
+
         if (!string.IsNullOrWhiteSpace(options.Directives))
         {
             builder.AddDirectives(options.Directives, Directory.GetCurrentDirectory());
+        }
+
+        var pathExclusions = WafExclusion.PathDirectives(options.Exclusions);
+        if (pathExclusions.Length > 0)
+        {
+            builder.AddDirectives(pathExclusions);
         }
 
         if (options.UseCoreRuleSet)
@@ -124,6 +135,13 @@ public static class WafServiceCollectionExtensions
         foreach (var file in options.RuleFiles)
         {
             builder.AddFile(Path.GetFullPath(file));
+        }
+
+        // After every rule: SecRuleUpdateTargetById needs the rule to exist.
+        var staticExclusions = WafExclusion.StaticDirectives(options.Exclusions);
+        if (staticExclusions.Length > 0)
+        {
+            builder.AddDirectives(staticExclusions);
         }
 
         // RuleEngine set in options wins over SecRuleEngine in loaded files.
