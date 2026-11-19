@@ -108,8 +108,15 @@ public class ConfigurationTests
         Assert.Same(original, provider.Current);
         Assert.True(Blocked(provider.Current, "first"));
 
-        source["Pondhawk:Waf:Directives"] = "SecRule ARGS \"@bogus\" \"id:1\"";
         source.Remove("Pondhawk:Waf:ParanoiaLevel");
+        source["Pondhawk:Waf:Profile"] = "Bogus";
+        failed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Reload(config, source);
+        await failed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Same(original, provider.Current);
+
+        source.Remove("Pondhawk:Waf:Profile");
+        source["Pondhawk:Waf:Directives"] = "SecRule ARGS \"@bogus\" \"id:1\"";
         failed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
         Reload(config, source);
         await failed.Task.WaitAsync(TimeSpan.FromSeconds(10));

@@ -53,6 +53,9 @@ public sealed class WafConfig
     /// <summary>Called for every matched rule that has the log action (the ModSecurity error log).</summary>
     public Action<MatchedRule>? ErrorCallback { get; set; }
 
+    /// <summary>Called each time <see cref="ErrorCallback"/> or the audit log writer throws (see <see cref="WafEngine.LogFailures"/>).</summary>
+    public Action? LogFailureCallback { get; set; }
+
     public string? TempDirectory { get; set; }
 
     public List<string> ComponentSignatures { get; } = [];
@@ -75,12 +78,25 @@ public sealed class WafEngine
     private long _logFailures;
 
     /// <summary>
-    /// Times the error callback threw. Rule matching ignores these failures so that a broken log sink does not fail
-    /// requests; monitor this count instead.
+    /// Times a log sink threw: the error callback, or the audit log writer as reported by the host. The WAF ignores these
+    /// failures so that a broken log sink does not fail requests; monitor this count instead.
     /// </summary>
     public long LogFailures => Interlocked.Read(ref _logFailures);
 
-    internal void RecordLogFailure() => Interlocked.Increment(ref _logFailures);
+    /// <summary>Counts a log sink failure. Hosts call it when the audit log writer throws in <see cref="Transaction.ProcessLogging"/>.</summary>
+    public void RecordLogFailure()
+    {
+        Interlocked.Increment(ref _logFailures);
+        try
+        {
+            Config.LogFailureCallback?.Invoke();
+        }
+#pragma warning disable CA1031 // Counting a failure must not fail the request.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
+    }
 
     /// <summary>Top-level rules in evaluation order (chain links hang off <see cref="Rule.Chain"/>).</summary>
     public IReadOnlyList<Rule> Rules => _rules;

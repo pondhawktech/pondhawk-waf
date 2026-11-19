@@ -1,3 +1,4 @@
+using System.Diagnostics;
 // Transaction processing follows OWASP Coraza (Apache-2.0) internal/corazawaf/transaction.go.
 using System.Globalization;
 using System.Text.RegularExpressions;
@@ -103,6 +104,15 @@ public sealed class Transaction : IDisposable
 
     /// <summary>Rules that matched, in order.</summary>
     public IReadOnlyList<MatchedRule> MatchedRules => _matchedRules;
+
+    private readonly long[] _phaseTicks = new long[Phases.Logging + 1];
+
+    /// <summary>
+    /// Time spent in a phase (1-5): its rules and, for phases 2 and 4, parsing the body. Waiting for the network is not
+    /// included. Summed over calls.
+    /// </summary>
+    public TimeSpan PhaseDuration(int phase) =>
+        phase is >= Phases.RequestHeaders and <= Phases.Logging ? Stopwatch.GetElapsedTime(0, _phaseTicks[phase]) : TimeSpan.Zero;
 
     /// <summary>True when a matched rule asked for audit logging.</summary>
     public bool IsRelevantForAudit => _audit;
@@ -249,6 +259,19 @@ public sealed class Transaction : IDisposable
 
     public Interruption? ProcessRequestHeaders()
     {
+        var start = Stopwatch.GetTimestamp();
+        try
+        {
+            return ProcessRequestHeadersCore();
+        }
+        finally
+        {
+            _phaseTicks[Phases.RequestHeaders] += Stopwatch.GetTimestamp() - start;
+        }
+    }
+
+    private Interruption? ProcessRequestHeadersCore()
+    {
         if (IsRuleEngineOff || LastPhase >= Phases.RequestHeaders || IsInterrupted)
         {
             return Interruption;
@@ -343,6 +366,19 @@ public sealed class Transaction : IDisposable
 
     public Interruption? ProcessRequestBody()
     {
+        var start = Stopwatch.GetTimestamp();
+        try
+        {
+            return ProcessRequestBodyCore();
+        }
+        finally
+        {
+            _phaseTicks[Phases.RequestBody] += Stopwatch.GetTimestamp() - start;
+        }
+    }
+
+    private Interruption? ProcessRequestBodyCore()
+    {
         if (IsRuleEngineOff || IsInterrupted || LastPhase != Phases.RequestHeaders)
         {
             return Interruption;
@@ -415,6 +451,19 @@ public sealed class Transaction : IDisposable
     }
 
     public Interruption? ProcessResponseHeaders(int status, string protocol)
+    {
+        var start = Stopwatch.GetTimestamp();
+        try
+        {
+            return ProcessResponseHeadersCore(status, protocol);
+        }
+        finally
+        {
+            _phaseTicks[Phases.ResponseHeaders] += Stopwatch.GetTimestamp() - start;
+        }
+    }
+
+    private Interruption? ProcessResponseHeadersCore(int status, string protocol)
     {
         if (IsRuleEngineOff || LastPhase >= Phases.ResponseHeaders || IsInterrupted)
         {
@@ -534,6 +583,19 @@ public sealed class Transaction : IDisposable
     /// <summary>Runs phase 4. Call after ProcessResponseHeaders and after all body bytes were written.</summary>
     public Interruption? ProcessResponseBody()
     {
+        var start = Stopwatch.GetTimestamp();
+        try
+        {
+            return ProcessResponseBodyCore();
+        }
+        finally
+        {
+            _phaseTicks[Phases.ResponseBody] += Stopwatch.GetTimestamp() - start;
+        }
+    }
+
+    private Interruption? ProcessResponseBodyCore()
+    {
         if (IsRuleEngineOff || IsInterrupted || LastPhase != Phases.ResponseHeaders)
         {
             return Interruption;
@@ -624,6 +686,19 @@ public sealed class Transaction : IDisposable
 
     /// <summary>Runs phase 5 and writes the audit log entry when relevant.</summary>
     public void ProcessLogging()
+    {
+        var start = Stopwatch.GetTimestamp();
+        try
+        {
+            ProcessLoggingCore();
+        }
+        finally
+        {
+            _phaseTicks[Phases.Logging] += Stopwatch.GetTimestamp() - start;
+        }
+    }
+
+    private void ProcessLoggingCore()
     {
         if (!IsRuleEngineOff)
         {

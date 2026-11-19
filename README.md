@@ -23,7 +23,7 @@
 |---------|-------------|
 | **Pondhawk.Waf.AspNetCore** | The middleware, options and profiles. **Install this one**; it brings the others. |
 | **Pondhawk.Waf** | The engine: SecLang parser, rule evaluation, operators, transformations, body processors, audit log. Use it directly to inspect traffic outside ASP.NET Core. |
-| **Pondhawk.Waf.CoreRuleSet** | OWASP CRS v4.30.0, embedded unmodified, and the Pondhawk base configuration. |
+| **Pondhawk.Waf.CoreRuleSet** | OWASP CRS v4.30.0 and the official CRS application plugins, embedded unmodified, and the Pondhawk base configuration. |
 | **Pondhawk.Waf.LibInjection** | C# port of libinjection (SQLi and XSS fingerprinting), used by CRS `@detectSQLi` and `@detectXSS`. |
 
 - [Quick start](#quick-start)
@@ -32,6 +32,7 @@
 - [Configuration examples](#configuration-examples)
 - [Options](#options)
 - [Logs](#logs)
+- [Metrics](#metrics)
 - [What it protects against](#what-it-protects-against)
 - [Limits and failure behavior](#limits-and-failure-behavior)
 
@@ -75,7 +76,8 @@ Start without blocking, then tune, then block.
 1. Deploy with `RuleEngine = RuleEngineMode.DetectionOnly` (the default). Requests are inspected and logged, never
    blocked. Startup logs a warning to remind you.
 2. Read the `Pondhawk.Waf.Rules` log. Each line is a rule that matched: a real attack or a false positive.
-3. Add an [exclusion](#exclude-a-field-from-a-rule-group) for each false positive.
+3. Add an [exclusion](#exclusions) for each false positive, or the [plugin](#application-plugins) of a known
+   application.
 4. Set `RuleEngine = RuleEngineMode.On`.
 
 To move to a higher profile later (for example Balanced to Strict), repeat the cycle. The rules of the next level
@@ -131,26 +133,45 @@ first request.
 
 ### Settings from appsettings.json
 
+Bind the options to a configuration section:
+
+```csharp
+builder.Services.AddPondhawkWaf(builder.Configuration.GetSection("Pondhawk:Waf"), options =>
+{
+    // Values that configuration cannot hold.
+    options.Bypass = ctx => ctx.Request.Path == "/healthz";
+});
+```
+
 ```json
 {
-  "Waf": {
-    "Profile": "Balanced",
-    "Enforce": false
+  "Pondhawk": {
+    "Waf": {
+      "RuleEngine": "On",
+      "Profile": "Strict",
+      "RequestBodyLimit": 52428800,
+      "Plugins": [ "WordPress" ],
+      "Exclusions": [
+        { "Rule": "942100", "Target": "ARGS:password", "Path": "/login" },
+        { "Tag": "attack-xss", "Target": "ARGS:json.body", "Path": "/api/posts" },
+        { "Rule": "920350" }
+      ]
+    }
   }
 }
 ```
 
-```csharp
-builder.Services.AddPondhawkWaf(options =>
-{
-    options.Profile = builder.Configuration.GetValue("Waf:Profile", WafProfile.Balanced);
-    options.RuleEngine = builder.Configuration.GetValue("Waf:Enforce", false)
-        ? RuleEngineMode.On
-        : RuleEngineMode.DetectionOnly;
-});
-```
+Every option in the [table](#options) binds by name. Keep `"RuleEngine": "DetectionOnly"` in `appsettings.json` and
+set `"On"` in `appsettings.Production.json` when tuning is done.
 
-Set `"Enforce": true` in `appsettings.Production.json` when tuning is done. A change needs a restart.
+**Reload without a restart.** When the section changes (for example, `appsettings.json` is saved), the WAF builds a
+new engine in the background and swaps it in:
+
+- Requests in flight finish on the old engine.
+- A configuration that does not build (invalid value, bad directive) logs an error (event 15) and the current rules
+  stay in force. Startup still fails on an invalid configuration.
+- A successful reload logs the new settings (event 14).
+- Changes to `RuleFiles` on disk are not watched. Set `ReloadOnChange` to `false` to turn reload off.
 
 ### Middleware order
 
@@ -178,40 +199,69 @@ options.Bypass = ctx => ctx.Request.Path == "/healthz";
 
 A bypassed request is not inspected at all. Keep the predicate narrow. Never base it on a header the client controls.
 
-### Exclude a field from a rule group
+### Exclusions
 
-Fix false positives with exclusions, not by lowering the profile. A runtime exclusion goes in `Directives`, which
-loads before the CRS rules. It can depend on the request:
+Fix false positives with exclusions, not by lowering the profile. The rule id is in the `Pondhawk.Waf.Rules` log line
+(`[id "942100"]`).
+
+```csharp
+builder.Services.AddPondhawkWaf(options =>
+{
+    // The password field of /login may contain anything: rule 942100 does not inspect it.
+    options.Exclude(942100, "ARGS:password", path: "/login");
+
+    // Rich-text editor: no XSS rules on the body field of /api/posts and the paths below it.
+    options.ExcludeByTag("attack-xss", "ARGS:json.body", path: "/api/posts");
+
+    // A rule, a range or a tag off for one path, or everywhere.
+    options.RemoveRule(920350);
+    options.RemoveRules(942100, 942199, path: "/admin/sql-console");
+    options.RemoveRulesByTag("attack-sqli", path: "/admin/sql-console");
+
+    // SQLi rules do not inspect the tracking cookie, everywhere.
+    options.ExcludeByTag("attack-sqli", "REQUEST_COOKIES:tracking");
+});
+```
+
+- **Target:** a variable with an optional key: `ARGS:name`, `REQUEST_COOKIES:name`, `REQUEST_HEADERS:User-Agent`,
+  `FILES:avatar`, or a key regex such as `ARGS:/^json\.items\./`. JSON fields are named `json.<path>`:
+  `{"post":{"body":"..."}}` gives `ARGS:json.post.body`.
+- **Path:** a prefix that matches the path and the paths below it, ignoring case: `/login` matches `/login` and
+  `/login/step2`, not `/login2`. It is the path as the client sends it, before `PathBase` is removed.
+- **Safe paths:** a path exclusion does not apply when the server could route the request target to another path: dot
+  segments (`/login/../admin`), encoded slashes or dots, backslashes, or an absolute-form target. Those requests get
+  the full rules.
+- **Errors:** an invalid exclusion fails at startup. So does an `Exclude` without a path for a rule id that does not
+  exist.
+
+The helpers generate SecLang. To write it yourself, use `Directives` for runtime (`ctl`) exclusions and
+`DirectivesAfterRules` for `SecRuleRemoveById` and `SecRuleUpdateTargetBy*`:
 
 ```csharp
 options.Directives = """
-    # The password field of /login may contain anything: no SQL injection rules on it.
-    SecRule REQUEST_FILENAME "@streq /login" \
-        "id:10001,phase:1,pass,nolog,ctl:ruleRemoveTargetByTag=attack-sqli;ARGS:password"
-
-    # Rich-text editor: no XSS rules on the body field of /api/posts.
-    SecRule REQUEST_FILENAME "@beginsWith /api/posts" \
-        "id:10002,phase:1,pass,nolog,ctl:ruleRemoveTargetByTag=attack-xss;ARGS:json.body"
+    SecRule REQUEST_HEADERS:X-Tenant "@streq legacy" \
+        "id:10001,phase:1,pass,nolog,ctl:ruleRemoveTargetByTag=attack-sqli;ARGS:filter"
+    """;
+options.DirectivesAfterRules = """
+    SecRuleUpdateTargetById 942100 "!ARGS:search"
     """;
 ```
 
-JSON fields are named `json.<path>`: `{"post":{"body":"..."}}` gives `ARGS:json.post.body`.
+Use ids 10000-99999 for your own rules. The WAF generates ids 900000, 900001, 900002, 900110 and 10000000 and up:
+set the paranoia level and thresholds with options, not with `SecAction`.
 
-### Exclude everywhere
+### Application plugins
 
-Exclusions for every request go in `DirectivesAfterRules`, which loads after the CRS rules:
+The official CRS rule exclusion plugins remove the known false positives of popular applications, on those
+applications' paths only:
 
 ```csharp
-options.DirectivesAfterRules = """
-    SecRuleRemoveById 920350
-    SecRuleUpdateTargetById 942100 "!ARGS:search"
-    SecRuleUpdateTargetByTag attack-sqli "!REQUEST_COOKIES:tracking"
-    """;
+options.Plugins.Add(CrsPlugin.WordPress);   // using Pondhawk.Waf.CoreRuleSet;
 ```
 
-The rule id is in the `Pondhawk.Waf.Rules` log line (`[id "942100"]`). Use ids 10000-99999 for your own rules. The
-options generate ids 900000, 900001, 900002 and 900110: set the paranoia level and thresholds with options, not with
-`SecAction`.
+Available: `WordPress`, `Drupal`, `Nextcloud`, `DokuWiki`, `CPanel`, `PhpBB`, `PhpMyAdmin`, `XenForo`. Use them when
+the WAF protects one of these applications behind a reverse proxy built on ASP.NET Core (for example YARP). A plugin
+setting can be changed with a `SecAction` in `Directives`, which loads after the plugin configuration.
 
 ### Your own rules
 
@@ -303,16 +353,20 @@ options.RuleFiles.Add("/etc/myapp/rules.conf");
 | `RequestBodyLimit` | profile | Largest request body, files included (413 above) |
 | `RequestBodyNoFilesLimit` | profile | Largest body without files: URL-encoded, JSON, XML, multipart form fields (413 above). Bounds the CPU time of one request |
 | `ArgumentsLimit` | profile | Most arguments or multipart parts per request (400 above) |
+| `Exclusions` | none | Rule exclusions ([Exclusions](#exclusions)); in code, use the helpers |
+| `Plugins` | none | CRS application plugins ([Application plugins](#application-plugins)) |
 | `Directives` | none | SecLang loaded after the profile settings, before the CRS rules: runtime (`ctl`) exclusions, your rules |
 | `DirectivesAfterRules` | none | SecLang loaded after the CRS rules: `SecRuleRemoveById`, `SecRuleUpdateTargetBy*` |
 | `RuleFiles` | none | SecLang files from disk, loaded last |
 | `Bypass` | none | Predicate for requests that skip the WAF |
 | `UseCoreRuleSet` | `true` | Load the embedded CRS. The base configuration (body processing, limits) loads either way |
 | `WarmUp` | `true` | Run synthetic requests at startup, so the first real requests do not pay for regex compilation |
+| `ReloadOnChange` | `true` | Rebuild the engine when bound configuration changes ([reload](#settings-from-appsettingsjson)) |
 | `Configure` | none | Access to the engine builder (`WafBuilder`) after the options are applied |
 
-Load order: base configuration → CRS setup → profile settings → `Directives` → CRS rules → `DirectivesAfterRules`
-→ `RuleFiles`. Later settings win.
+Load order: base configuration → CRS setup → profile settings → plugin configuration → `Directives` → path
+exclusions → plugins (before) → CRS rules → plugins (after) → `DirectivesAfterRules` → `RuleFiles` → global
+exclusions. Later settings win.
 
 ## Logs
 
@@ -321,7 +375,7 @@ Load order: base configuration → CRS setup → profile settings → `Directive
 | `Pondhawk.Waf.Rules` | Warning | One ModSecurity-style line per matched rule |
 | `Pondhawk.Waf.Audit` | Information | One JSON entry per relevant request: a rule matched, the WAF blocked, or a 5xx |
 | `Pondhawk.Waf.AspNetCore.WafMiddleware` | Warning | One line per blocked request |
-| `Pondhawk.Waf` | Information, Warning | Effective settings at startup; a warning when the rule engine does not block |
+| `Pondhawk.Waf` | Information, Warning, Error | Effective settings at startup and after a reload; a warning when the rule engine does not block; an error when a changed configuration does not build |
 
 ```json
 {
@@ -348,7 +402,34 @@ What the logs contain:
   logged: they are the attack.
 - **Escaped control characters**, including Unicode line breaks, so a request cannot forge log lines.
 
-A log provider that throws does not fail requests. `WafEngine.LogFailures` counts the failures.
+A log provider that throws does not fail requests. `WafEngine.LogFailures` and the `pondhawk.waf.log_failures` metric
+count the failures.
+
+## Metrics
+
+The WAF publishes metrics on the `Pondhawk.Waf` meter. With OpenTelemetry:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics
+        .AddMeter("Pondhawk.Waf")
+        .AddPrometheusExporter());
+```
+
+Or live, without code: `dotnet-counters monitor -n MyApp --counters Pondhawk.Waf`.
+
+| Instrument | Type | Tags | Use |
+|---|---|---|---|
+| `pondhawk.waf.requests` | counter | `waf.result`: `allowed`, `blocked`, `detected`, `bypassed`, `off` | Traffic and block rate |
+| `pondhawk.waf.blocks` | counter | `waf.rule.id`, `waf.action`, `http.response.status_code` | What blocks, and why |
+| `pondhawk.waf.would_block` | counter | same as `blocks` | DetectionOnly: what On would block |
+| `pondhawk.waf.rule.matches` | counter | `waf.rule.id` | Matches of rules that log: find false positives |
+| `pondhawk.waf.phase.duration` | histogram, s | `waf.phase`: `request_headers`, `request_body`, `response_headers`, `response_body`, `logging` | WAF latency; network waits excluded |
+| `pondhawk.waf.log_failures` | counter | none | Log or audit sink failures |
+| `pondhawk.waf.reloads` | counter | `waf.result`: `success`, `failure` | Configuration reloads |
+
+To tune a higher profile, run it in DetectionOnly. Then read `would_block` and `rule.matches` by rule id: each rule
+with many matches on normal traffic needs an exclusion.
 
 ## What it protects against
 
@@ -373,7 +454,8 @@ The base configuration also rejects:
 - requests with too many arguments;
 - oversized bodies.
 
-The engine passes all 5,193 tests of the CRS v4.30.0 regression suite.
+The engine passes all 5,193 tests of the CRS v4.30.0 regression suite, and the 459 regression tests of the bundled
+application plugins.
 
 ## Limits and failure behavior
 
@@ -388,7 +470,8 @@ Not inspected:
 
 Failure behavior:
 
-- **Configuration errors** (invalid option values, bad directives, missing rule files) fail startup.
+- **Configuration errors** (invalid option values, bad directives, missing rule files) fail startup. After startup,
+  a reload with errors keeps the current rules.
 - **Engine errors** during a request fail the request (500). The request never reaches the application uninspected.
 - **Cost:** every rule runs over every byte of a body without files. At the 1 MiB default, a worst-case body costs
   about 0.5-0.8 s of CPU. Lower `RequestBodyNoFilesLimit` if your API does not need large bodies, and rate-limit

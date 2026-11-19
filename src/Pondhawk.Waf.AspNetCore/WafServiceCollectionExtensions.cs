@@ -48,6 +48,8 @@ public static class WafServiceCollectionExtensions
 
     private static IServiceCollection AddCore(IServiceCollection services)
     {
+        services.AddMetrics();
+        services.TryAddSingleton<WafMetrics>();
         services.TryAddSingleton<WafEngineProvider>();
 
         // The engine for new requests; it changes on reload, so resolve it when needed instead of keeping it.
@@ -104,7 +106,7 @@ public static class WafServiceCollectionExtensions
         return sb.ToString();
     }
 
-    internal static WafEngine CreateEngine(WafOptions options, ILoggerFactory loggerFactory)
+    internal static WafEngine CreateEngine(WafOptions options, ILoggerFactory loggerFactory, WafMetrics? metrics = null)
     {
         var fs = new CompositeConfigFileSystem(CoreRuleSetFiles.FileSystem);
         var builder = new WafBuilder(fs);
@@ -112,6 +114,10 @@ public static class WafServiceCollectionExtensions
         var auditLog = loggerFactory.CreateLogger("Pondhawk.Waf.Audit");
         builder.Config.ErrorCallback = matched => WafLog.RuleMatched(errorLog, matched.ErrorLogLine());
         builder.Config.AuditLogWriter = new LoggerAuditLogWriter(auditLog);
+        if (metrics is not null)
+        {
+            builder.Config.LogFailureCallback = metrics.LogFailure;
+        }
 
         // The base configuration (body access and processors, limits, the deny rules for unparsable bodies) applies
         // with or without CRS: without it, request bodies would not be inspected or limited at all.
