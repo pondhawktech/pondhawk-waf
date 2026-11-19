@@ -15,6 +15,12 @@ OWASP Core Rule Set v4.30.0 (https://github.com/coreruleset/coreruleset)
   (license: src/Pondhawk.Waf.CoreRuleSet/crs/LICENSE). Regression tests bundled in
   tests/Pondhawk.Waf.CrsRegression/crs-tests.
 
+OWASP CRS rule exclusion plugins (https://github.com/coreruleset): WordPress, Drupal, Nextcloud, DokuWiki, cPanel,
+phpBB, phpMyAdmin and XenForo.
+  Licensed under the Apache License, Version 2.0. Copyright the CRS project and contributors. Bundled unmodified in
+  src/Pondhawk.Waf.CoreRuleSet/plugins (versions: plugins/VERSIONS; licenses: plugins/*/LICENSE). Regression tests
+  bundled in tests/Pondhawk.Waf.CrsRegression/plugin-tests.
+
 libinjection-go (https://github.com/corazawaf/libinjection-go)
   Licensed under the BSD 3-Clause License. Copyright (c) 2022-Present, Coraza.
   Ported to C# in src/Pondhawk.Waf.LibInjection (license: src/Pondhawk.Waf.LibInjection/LICENSE-libinjection.txt).

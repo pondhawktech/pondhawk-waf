@@ -11,6 +11,6 @@
     <ProjectReference Include="..\..\src\Pondhawk.Waf.AspNetCore\Pondhawk.Waf.AspNetCore.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="crs-tests/**/*.yaml;coraza-overrides.yaml;kestrel-overrides.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="crs-tests/**/*.yaml;plugin-tests/**/*.yaml;coraza-overrides.yaml;kestrel-overrides.yaml;plugin-overrides.yaml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -275,16 +275,17 @@ internal static class Multipart
         totalSize += content.Length;
         if (fileName.Length > 0)
         {
+            // Keyed by the part's field name, as ModSecurity does (Coraza uses empty keys), so FILES:avatar selects
+            // and ctl:ruleRemoveTargetById=...;FILES:avatar excludes one upload field.
             var size = content.Length.ToString(CultureInfo.InvariantCulture);
-            v.Files.Add(string.Empty, fileName);
-            v.FilesSizes.Set(fileName, size);
+            v.Files.Add(partName, fileName);
             if (fields.AltFileName.Length > 0 && fields.AltFileName != fileName)
             {
-                v.Files.Add(string.Empty, fields.AltFileName);
-                v.FilesSizes.Set(fields.AltFileName, size);
+                v.Files.Add(partName, fields.AltFileName);
             }
 
-            v.FilesNames.Add(string.Empty, partName);
+            v.FilesSizes.Add(partName, size);
+            v.FilesNames.Add(partName, partName);
             v.FilesCombinedSize.Set(totalSize.ToString(CultureInfo.InvariantCulture));
             return false;
         }

@@ -1,0 +1,34 @@
+---
+# Expected differences between the CRS plugin reference (ModSecurity on Apache and nginx) and Pondhawk WAF.
+# Both differences are inherited from Coraza and keep more of the request inspected; see docs/DESIGN.md.
+#
+# 1. Unknown content types: CRS rule 901340 sets ctl:forceRequestBodyVariable=On when no body processor is chosen.
+#    ModSecurity then only fills REQUEST_BODY; Pondhawk (like Coraza) also parses the body as URLENCODED, so the
+#    lines of a text/vcard, text/calendar or text/plain body become ARGS and ARGS_NAMES that rules inspect.
+# 2. XML namespace declarations: libxml2 does not return xmlns attributes for the XPath //@*; Pondhawk (like Coraza)
+#    includes them in XML://@*.
+test_overrides:
+  - rule_id: 9508118
+    test_ids: [1, 2]
+    reason: 'Difference 2: rule 942432 matches a namespace URI in XML://@*; the plugin only excludes XML:/*.'
+    output:
+      log:
+        no_expect_ids: [911100, 942430, 942431]
+  - rule_id: 9508320
+    test_ids: [1, 3, 4]
+    reason: 'Difference 1: the text/vcard body is parsed as URLENCODED; the plugin excludes REQUEST_BODY and XML, not ARGS.'
+    output:
+      log:
+        no_expect_ids: [911100, 920420, 920530, 921110, 942440]
+  - rule_id: 9508330
+    test_ids: [1]
+    reason: 'Difference 1: the text/calendar body is parsed as URLENCODED; the plugin excludes REQUEST_BODY and XML, not ARGS.'
+    output:
+      log:
+        no_expect_ids: [911100, 932236, 942440]
+  - rule_id: 9508540
+    test_ids: [1, 2]
+    reason: 'Difference 1: the text/plain body is parsed as URLENCODED; the plugin excludes REQUEST_BODY, not ARGS and ARGS_NAMES.'
+    output:
+      log:
+        no_expect_ids: [931130, 932240, 942200, 942330, 942450]
