@@ -3,7 +3,6 @@ using System.Globalization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Pondhawk.Waf.Text;
 
 namespace Pondhawk.Waf.AspNetCore;
@@ -13,20 +12,22 @@ namespace Pondhawk.Waf.AspNetCore;
 /// phase 3 (response headers) and phase 4 (response body) before the response reaches the client; phase 5 (logging)
 /// at the end. A match in any of phases 1-4 replaces the response.
 /// </summary>
-public sealed partial class WafMiddleware(RequestDelegate next, WafEngine waf, IOptions<WafOptions> options, ILogger<WafMiddleware> logger)
+public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvider engines, ILogger<WafMiddleware> logger)
 {
     /// <summary>The key under which the transaction is stored in <see cref="HttpContext.Items"/>.</summary>
     public static readonly object TransactionKey = new();
 
     public async Task InvokeAsync(HttpContext context)
     {
-        if (options.Value.Bypass?.Invoke(context) == true)
+        // One snapshot per request: a reload swaps the engine for new requests only.
+        var snapshot = engines.Snapshot;
+        if (snapshot.Options.Bypass?.Invoke(context) == true)
         {
             await next(context);
             return;
         }
 
-        using var tx = waf.NewTransaction(context.TraceIdentifier);
+        using var tx = snapshot.Engine.NewTransaction(context.TraceIdentifier);
         context.Items[TransactionKey] = tx;
         try
         {

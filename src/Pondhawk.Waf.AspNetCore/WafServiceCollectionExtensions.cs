@@ -1,6 +1,8 @@
 using System.Globalization;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Pondhawk.Waf.AuditLog;
@@ -12,7 +14,7 @@ namespace Pondhawk.Waf.AspNetCore;
 public static class WafServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers the WAF engine as a singleton. By default it loads the embedded OWASP CRS in DetectionOnly mode.
+    /// Registers the WAF. By default it loads the embedded OWASP CRS in DetectionOnly mode.
     /// </summary>
     public static IServiceCollection AddPondhawkWaf(this IServiceCollection services, Action<WafOptions>? configure = null)
     {
@@ -22,9 +24,34 @@ public static class WafServiceCollectionExtensions
             optionsBuilder.Configure(configure);
         }
 
-        services.AddSingleton(sp => CreateEngine(
-            sp.GetRequiredService<IOptions<WafOptions>>().Value,
-            sp.GetRequiredService<ILoggerFactory>()));
+        return AddCore(services);
+    }
+
+    /// <summary>
+    /// Registers the WAF with options bound from a configuration section, for example
+    /// <c>builder.Configuration.GetSection("Pondhawk:Waf")</c>. <paramref name="configure"/> runs after the binding, for
+    /// values that configuration cannot hold (<see cref="WafOptions.Bypass"/>, <see cref="WafOptions.Configure"/>).
+    /// When the configuration changes, the engine is rebuilt and swapped without a restart
+    /// (<see cref="WafOptions.ReloadOnChange"/>).
+    /// </summary>
+    public static IServiceCollection AddPondhawkWaf(this IServiceCollection services, IConfiguration configuration, Action<WafOptions>? configure = null)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        var optionsBuilder = services.AddOptions<WafOptions>().Bind(configuration);
+        if (configure is not null)
+        {
+            optionsBuilder.Configure(configure);
+        }
+
+        return AddCore(services);
+    }
+
+    private static IServiceCollection AddCore(IServiceCollection services)
+    {
+        services.TryAddSingleton<WafEngineProvider>();
+
+        // The engine for new requests; it changes on reload, so resolve it when needed instead of keeping it.
+        services.TryAddTransient(sp => sp.GetRequiredService<WafEngineProvider>().Current);
         return services;
     }
 
@@ -35,11 +62,10 @@ public static class WafServiceCollectionExtensions
     public static IApplicationBuilder UsePondhawkWaf(this IApplicationBuilder app)
     {
         // Build the engine now so configuration errors fail startup, not the first request.
-        var waf = app.ApplicationServices.GetRequiredService<WafEngine>();
-        var options = app.ApplicationServices.GetRequiredService<IOptions<WafOptions>>().Value;
+        var snapshot = app.ApplicationServices.GetRequiredService<WafEngineProvider>().Snapshot;
         var logger = app.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger("Pondhawk.Waf");
-        var s = options.Resolve();
-        WafLog.Started(logger, waf.Config.RuleEngine, options.Profile, s.ParanoiaLevel, s.DetectionParanoiaLevel,
+        var (waf, s) = (snapshot.Engine, snapshot.Settings);
+        WafLog.Started(logger, waf.Config.RuleEngine, snapshot.Options.Profile, s.ParanoiaLevel, s.DetectionParanoiaLevel,
             s.InboundAnomalyScoreThreshold, s.InspectResponses, waf.Rules.Count);
         if (waf.Config.RuleEngine != RuleEngineMode.On)
         {
@@ -202,4 +228,10 @@ internal static partial class WafLog
 
     [LoggerMessage(EventId = 13, Level = LogLevel.Warning, Message = "Pondhawk WAF rule engine is {RuleEngine}: requests are inspected and logged but NOT blocked. Set WafOptions.RuleEngine = RuleEngineMode.On to block.")]
     public static partial void NotBlocking(ILogger logger, RuleEngineMode ruleEngine);
+
+    [LoggerMessage(EventId = 14, Level = LogLevel.Information, Message = "Pondhawk WAF reloaded: rule engine {RuleEngine}, profile {Profile}, paranoia level {ParanoiaLevel} (detection {DetectionParanoiaLevel}), inbound threshold {InboundThreshold}, response inspection {InspectResponses}, {RuleCount} rules")]
+    public static partial void Reloaded(ILogger logger, RuleEngineMode ruleEngine, WafProfile profile, int paranoiaLevel, int detectionParanoiaLevel, int inboundThreshold, bool inspectResponses, int ruleCount);
+
+    [LoggerMessage(EventId = 15, Level = LogLevel.Error, Message = "Pondhawk WAF configuration changed but the new configuration is not valid; the current rules stay in force")]
+    public static partial void ReloadFailed(ILogger logger, Exception exception);
 }
