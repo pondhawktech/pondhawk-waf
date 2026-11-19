@@ -8,11 +8,11 @@ Design and roadmap: [DESIGN.md](DESIGN.md). Usage: [README](../README.md).
 |---|---|
 | `src/Pondhawk.Waf` | Engine: SecLang parser, transactions, operators, transformations, actions, body processors |
 | `src/Pondhawk.Waf.LibInjection` | C# port of libinjection (SQLi and XSS detection) |
-| `src/Pondhawk.Waf.CoreRuleSet` | Embedded CRS v4.30.0 and the base configuration (`pondhawk/pondhawk-waf.conf`) |
+| `src/Pondhawk.Waf.CoreRuleSet` | Embedded CRS v4.30.0, the CRS exclusion plugins (`plugins/`) and the base configuration (`pondhawk/pondhawk-waf.conf`) |
 | `src/Pondhawk.Waf.AspNetCore` | Middleware, options, profiles and DI registration |
 | `tests/Pondhawk.Waf.Tests` | Engine, parser, middleware, profile and security regression tests |
 | `tests/Pondhawk.Waf.LibInjection.Tests` | All libinjection test vectors |
-| `tests/Pondhawk.Waf.CrsRegression` | CRS regression suite runner (Kestrel, raw TCP) |
+| `tests/Pondhawk.Waf.CrsRegression` | CRS and plugin regression suite runner (Kestrel, raw TCP) |
 | `samples/Pondhawk.Waf.Sample` | Minimal API sample |
 
 ## Build and test
@@ -31,6 +31,12 @@ suite (paranoia level 4, DetectionOnly), and compares the logged rule ids. Resul
 - 5,193 / 5,193 tests pass (5,088 request-side, 105 response-side). The backend implements albedo's `/reflect`.
 - 21 tests use expectations from `kestrel-overrides.yaml`: requests that Kestrel rejects (400/505) or normalizes
   before the middleware runs. Each has a reason.
+- The plugin tests (`plugin-tests/`, 459) run on a second server with every plugin loaded. 8 Nextcloud tests use
+  expectations from `plugin-overrides.yaml` (differences from ModSecurity, see DESIGN.md).
+
+To update a plugin, copy `plugins/*.conf` and `LICENSE` from its release into
+`src/Pondhawk.Waf.CoreRuleSet/plugins/<name>/`, its `tests/regression/*/*.yaml` into `plugin-tests/<name>/`, and
+update `plugins/VERSIONS`.
 
 Options: `--filter <rule-id or text>`, `--filter '942100-3$'` (exact), `--verbose`, `--debug`, `--report <file>`.
 

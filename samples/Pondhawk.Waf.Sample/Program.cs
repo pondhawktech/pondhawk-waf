@@ -1,20 +1,14 @@
-using Pondhawk.Waf;
 using Pondhawk.Waf.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddPondhawkWaf(options =>
+// Settings from the "Pondhawk:Waf" section of appsettings.json; edits apply without a restart.
+builder.Services.AddPondhawkWaf(builder.Configuration.GetSection("Pondhawk:Waf"), options =>
 {
-    // Start in DetectionOnly, review the "Pondhawk.Waf.Rules" log, then switch to On.
-    options.RuleEngine = builder.Configuration.GetValue("Waf:Enforce", false) ? RuleEngineMode.On : RuleEngineMode.DetectionOnly;
-    options.Profile = WafProfile.Balanced;
     options.Bypass = ctx => ctx.Request.Path == "/healthz";
 
-    // Example exclusion: the "password" argument of /login never triggers SQLi rules.
-    options.Directives = """
-        SecRule REQUEST_FILENAME "@streq /login" \
-            "id:10001,phase:1,pass,nolog,ctl:ruleRemoveTargetByTag=attack-sqli;ARGS:password"
-        """;
+    // Example exclusion: rule 942100 (SQL injection, libinjection) does not inspect the password field of /login.
+    options.Exclude(942100, "ARGS:password", path: "/login");
 });
 
 var app = builder.Build();

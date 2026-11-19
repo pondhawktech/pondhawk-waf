@@ -72,6 +72,19 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
 | `@rbl`, `@geoLookup`, `@inspectFile`, `@validateNid`, `@validateSchema`, `@restpath`, `@pmFromDataset` | supported | not implemented (parser error) |
 | Persistent collections (`initcol`, `IP`, `SESSION`) | not supported | accepted and ignored, as in Coraza |
 | Audit log formats | Native, JSON, OCSF; serial/concurrent/HTTPS | JSON through `ILogger` or `IAuditLogWriter` |
+| `FILES`, `FILES_NAMES`, `FILES_SIZES` keys | empty key | the part's field name, as in ModSecurity, so `FILES:avatar` selects and excludes one upload field |
+| `SecRuleUpdateTargetByTag "tag" "!VAR"` (both fields quoted) | outer quotes stripped from the whole argument | both fields parsed |
+
+Two Coraza behaviors differ from ModSecurity and are kept, because they inspect more of the request. The CRS plugins
+are tested on ModSecurity, so eight Nextcloud plugin tests have overrides in
+`tests/Pondhawk.Waf.CrsRegression/plugin-overrides.yaml`:
+
+- **Unknown content types.** CRS rule 901340 sets `ctl:forceRequestBodyVariable=On` when no body processor is chosen
+  (for example, `text/plain` or `text/calendar`). ModSecurity then only fills `REQUEST_BODY`. Pondhawk, like Coraza,
+  also parses the body as URL-encoded, so its lines become `ARGS` that rules inspect. CRS rule 920420 rejects these
+  content types unless they are allowed.
+- **XML namespace declarations.** libxml2 does not return `xmlns` attributes for the XPath `//@*`. Pondhawk, like
+  Coraza, includes them in `XML://@*`.
 
 Server-level differences from Apache (the CRS reference) are listed with reasons in
 `tests/Pondhawk.Waf.CrsRegression/kestrel-overrides.yaml`.
@@ -148,12 +161,19 @@ An adversarial review (four reviewers: middleware, body parsing, rule engine, co
   log sink failures failing requests; a startup warning when the engine does not block; MIME type values could inject
   directives; `UseCoreRuleSet = false` dropped body inspection.
 
-### Milestone 3: operations
+### Milestone 3 (done): operations
 
-1. Configuration from `appsettings.json` (rule engine, paranoia level, exclusions) and reload without restart.
-2. Metrics (`System.Diagnostics.Metrics`): requests, blocks, matches per rule, latency.
-3. CRS plugin support (WordPress, Drupal, Nextcloud exclusion plugins) from the embedded file system.
-4. Rule exclusion helpers in C# (`options.Exclude(ruleId, "ARGS:password", path: "/login")`).
+1. Configuration from `appsettings.json` (`AddPondhawkWaf(IConfiguration)`) with reload without restart:
+   `WafEngineProvider` builds a new engine in the background and swaps it; requests in flight finish on the old one;
+   a configuration that does not build keeps the current engine.
+2. Metrics on the `Pondhawk.Waf` meter: requests by result, blocks and DetectionOnly would-blocks by rule, matches per
+   rule, time per phase (measured in `Transaction`, network waits excluded), log failures, reloads.
+3. The eight official CRS exclusion plugins, embedded and selected with `WafOptions.Plugins`; their regression tests
+   run with the CRS suite.
+4. Exclusion helpers (`Exclude`, `ExcludeByTag`, `RemoveRule`, `RemoveRules`, `RemoveRulesByTag`) and
+   `WafOptions.Exclusions` for configuration. A path exclusion matches the raw request target, by path segment, and
+   does not apply to targets a server could normalize to another path (dot segments, encoded `/` or `.`,
+   backslashes).
 
 ### Milestone 4: performance
 

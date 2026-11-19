@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 
 namespace Pondhawk.Waf.AspNetCore;
 
@@ -11,25 +12,43 @@ namespace Pondhawk.Waf.AspNetCore;
 /// </summary>
 public sealed class WafEngineProvider : IDisposable
 {
-    private readonly IOptionsMonitor<WafOptions> _monitor;
+    private readonly IOptionsFactory<WafOptions> _factory;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly WafMetrics _metrics;
     private readonly ILogger _logger;
-    private readonly IDisposable? _subscription;
+    private readonly List<IDisposable> _subscriptions = [];
     private readonly SemaphoreSlim _gate = new(1, 1);
     private volatile WafSnapshot _current;
     private long _requested;
     private long _generation;
 
-    public WafEngineProvider(IOptionsMonitor<WafOptions> monitor, ILoggerFactory loggerFactory)
+    // Options are created here, not read from IOptionsMonitor: a configuration value that fails to bind (an unknown
+    // enum name) must be logged like any other invalid configuration, and IOptionsMonitor throws it into the
+    // configuration provider's change callback instead.
+    public WafEngineProvider(
+        IOptionsFactory<WafOptions> factory,
+        IEnumerable<IOptionsChangeTokenSource<WafOptions>> changeSources,
+        ILoggerFactory loggerFactory,
+        WafMetrics metrics)
     {
-        _monitor = monitor;
+        ArgumentNullException.ThrowIfNull(factory);
+        ArgumentNullException.ThrowIfNull(changeSources);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+        _factory = factory;
         _loggerFactory = loggerFactory;
+        _metrics = metrics;
         _logger = loggerFactory.CreateLogger("Pondhawk.Waf");
-        var options = monitor.CurrentValue;
-        _current = new WafSnapshot(WafServiceCollectionExtensions.CreateEngine(options, loggerFactory), options, options.Resolve(), 0);
+        var options = factory.Create(Options.DefaultName);
+        _current = new WafSnapshot(WafServiceCollectionExtensions.CreateEngine(options, loggerFactory, metrics), options, options.Resolve(), 0);
         if (options.ReloadOnChange)
         {
-            _subscription = monitor.OnChange(_ => OnChange());
+            foreach (var source in changeSources)
+            {
+                if (source.Name is null || source.Name == Options.DefaultName)
+                {
+                    _subscriptions.Add(ChangeToken.OnChange(source.GetChangeToken, OnChange));
+                }
+            }
         }
     }
 
@@ -50,7 +69,11 @@ public sealed class WafEngineProvider : IDisposable
 
     public void Dispose()
     {
-        _subscription?.Dispose();
+        foreach (var subscription in _subscriptions)
+        {
+            subscription.Dispose();
+        }
+
         _gate.Dispose();
     }
 
@@ -68,7 +91,15 @@ public sealed class WafEngineProvider : IDisposable
             return; // A newer change follows; it rebuilds.
         }
 
-        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            return; // Shutting down.
+        }
+
         try
         {
             if (request != Interlocked.Read(ref _requested))
@@ -76,24 +107,27 @@ public sealed class WafEngineProvider : IDisposable
                 return;
             }
 
-            var options = _monitor.CurrentValue;
+            WafOptions options;
             WafSnapshot snapshot;
             try
             {
+                options = _factory.Create(Options.DefaultName);
                 var settings = options.Resolve();
-                var engine = WafServiceCollectionExtensions.CreateEngine(options, _loggerFactory);
+                var engine = WafServiceCollectionExtensions.CreateEngine(options, _loggerFactory, _metrics);
                 snapshot = new WafSnapshot(engine, options, settings, Interlocked.Increment(ref _generation));
             }
 #pragma warning disable CA1031 // Any build failure keeps the running engine.
             catch (Exception ex)
 #pragma warning restore CA1031
             {
+                _metrics.Reload(success: false);
                 WafLog.ReloadFailed(_logger, ex);
                 ReloadFailed?.Invoke(this, ex);
                 return;
             }
 
             _current = snapshot;
+            _metrics.Reload(success: true);
             WafLog.Reloaded(_logger, snapshot.Engine.Config.RuleEngine, options.Profile, snapshot.Settings.ParanoiaLevel,
                 snapshot.Settings.DetectionParanoiaLevel, snapshot.Settings.InboundAnomalyScoreThreshold,
                 snapshot.Settings.InspectResponses, snapshot.Engine.Rules.Count);

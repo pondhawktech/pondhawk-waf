@@ -12,7 +12,7 @@ namespace Pondhawk.Waf.AspNetCore;
 /// phase 3 (response headers) and phase 4 (response body) before the response reaches the client; phase 5 (logging)
 /// at the end. A match in any of phases 1-4 replaces the response.
 /// </summary>
-public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvider engines, ILogger<WafMiddleware> logger)
+public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvider engines, WafMetrics metrics, ILogger<WafMiddleware> logger)
 {
     /// <summary>The key under which the transaction is stored in <see cref="HttpContext.Items"/>.</summary>
     public static readonly object TransactionKey = new();
@@ -23,6 +23,7 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvide
         var snapshot = engines.Snapshot;
         if (snapshot.Options.Bypass?.Invoke(context) == true)
         {
+            metrics.Bypassed();
             await next(context);
             return;
         }
@@ -74,6 +75,7 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvide
             catch (Exception ex)
 #pragma warning restore CA1031
             {
+                tx.Waf.RecordLogFailure();
                 try
                 {
                     LogAuditFailure(logger, ex);
@@ -82,9 +84,11 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvide
                 catch (Exception)
 #pragma warning restore CA1031
                 {
-                    tx.Waf.RecordLogFailure();
+                    // Already counted; nothing else can report it.
                 }
             }
+
+            metrics.Completed(tx);
         }
     }
 
