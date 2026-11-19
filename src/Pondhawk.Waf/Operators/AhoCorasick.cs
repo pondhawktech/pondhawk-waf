@@ -75,13 +75,27 @@ internal sealed class AhoCorasick
         return false;
     }
 
-    /// <summary>Leftmost-longest, non-overlapping matches, up to <paramref name="max"/>.</summary>
-    public List<string> FindAll(string text, int max)
+    /// <summary>
+    /// Leftmost-longest, non-overlapping matches, up to <paramref name="max"/>. <paramref name="starts"/>, when given,
+    /// finds the same patterns (ASCII case-insensitive) and skips ahead to the next position where one begins.
+    /// </summary>
+    public List<string> FindAll(string text, int max, System.Buffers.SearchValues<string>? starts = null)
     {
         var result = new List<string>();
         var i = 0;
         while (i < text.Length && result.Count < max)
         {
+            if (starts is not null)
+            {
+                var next = text.AsSpan(i).IndexOfAny(starts);
+                if (next < 0)
+                {
+                    break;
+                }
+
+                i += next;
+            }
+
             var node = 0;
             var longest = 0;
             for (var j = i; j < text.Length; j++)

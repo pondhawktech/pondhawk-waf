@@ -184,7 +184,7 @@ public static class UrlEncoded
                 end = query.Length;
             }
 
-            var pair = query[start..end];
+            var pair = query.AsSpan(start, end - start);
             start = end + 1;
             if (pair.Length > 0)
             {
@@ -193,9 +193,9 @@ public static class UrlEncoded
                     return true;
                 }
 
-                var eq = pair.IndexOf('=', StringComparison.Ordinal);
+                var eq = pair.IndexOf('=');
                 var key = eq < 0 ? pair : pair[..eq];
-                var value = eq < 0 ? string.Empty : pair[(eq + 1)..];
+                var value = eq < 0 ? [] : pair[(eq + 1)..];
                 add(Unescape(key), Unescape(value));
                 count++;
             }
@@ -210,33 +210,54 @@ public static class UrlEncoded
     }
 
     /// <summary>Lenient query unescape: '+' to space, valid %XX decoded, invalid escapes kept.</summary>
-    public static string Unescape(string input)
+    public static string Unescape(string input) =>
+        input.AsSpan().IndexOfAny('%', '+') < 0 ? input : Unescape(input.AsSpan());
+
+    /// <summary>Lenient query unescape of a slice: '+' to space, valid %XX decoded, invalid escapes kept.</summary>
+    public static string Unescape(ReadOnlySpan<char> input)
     {
-        if (input.AsSpan().IndexOfAny('%', '+') < 0)
+        if (input.IsEmpty)
         {
-            return input;
+            return string.Empty;
         }
 
-        var sb = new StringBuilder(input.Length);
-        for (var i = 0; i < input.Length; i++)
+        var first = input.IndexOfAny('%', '+');
+        if (first < 0)
         {
-            var c = input[i];
-            if (c == '+')
+            return new string(input);
+        }
+
+        var length = input.Length;
+        for (var i = first; i < input.Length; i++)
+        {
+            if (input[i] == '%' && i + 2 < input.Length && ByteString.IsHex(input[i + 1]) && ByteString.IsHex(input[i + 2]))
             {
-                sb.Append(' ');
-            }
-            else if (c == '%' && i + 2 < input.Length && ByteString.IsHex(input[i + 1]) && ByteString.IsHex(input[i + 2]))
-            {
-                sb.Append((char)((ByteString.HexValue(input[i + 1]) << 4) | ByteString.HexValue(input[i + 2])));
+                length -= 2;
                 i += 2;
             }
-            else
-            {
-                sb.Append(c);
-            }
         }
 
-        return sb.ToString();
+        return string.Create(length, input, static (span, input) =>
+        {
+            var w = 0;
+            for (var i = 0; i < input.Length; i++)
+            {
+                var c = input[i];
+                if (c == '+')
+                {
+                    span[w++] = ' ';
+                }
+                else if (c == '%' && i + 2 < input.Length && ByteString.IsHex(input[i + 1]) && ByteString.IsHex(input[i + 2]))
+                {
+                    span[w++] = (char)((ByteString.HexValue(input[i + 1]) << 4) | ByteString.HexValue(input[i + 2]));
+                    i += 2;
+                }
+                else
+                {
+                    span[w++] = c;
+                }
+            }
+        });
     }
 }
 

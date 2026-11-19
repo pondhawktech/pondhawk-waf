@@ -67,11 +67,24 @@ public sealed class WafEngine
     private readonly List<Rule> _rules;
     private long _counter;
 
-    internal WafEngine(WafConfig config, List<Rule> rules)
+    internal WafEngine(WafConfig config, List<Rule> rules, bool fillsRuleCollection = true)
     {
         Config = config;
         _rules = rules;
+        FillsRuleCollection = fillsRuleCollection;
     }
+
+    /// <summary>False when no rule reads the RULE collection, so rules skip filling it.</summary>
+    internal bool FillsRuleCollection { get; }
+
+    /// <summary>Working memory reused by transactions.</summary>
+    internal EvaluationScratchPool ScratchPool { get; } = new();
+
+    /// <summary>
+    /// Completes when every @rx automaton is built. The engine is usable before: a rule whose regex is not built yet
+    /// builds it (or waits for it) on first use. Await it to take that cost before serving traffic.
+    /// </summary>
+    public Task Compiled { get; internal set; } = Task.CompletedTask;
 
     public WafConfig Config { get; }
 
@@ -109,45 +122,36 @@ public sealed class WafEngine
     }
 
     /// <summary>
-    /// Runs a few synthetic requests through the rules so lazily built regex automata exist before real traffic.
-    /// Matches from these requests are not logged.
+    /// Waits for <see cref="Compiled"/>, then runs a few synthetic requests through the rules so the DFA states that
+    /// typical traffic needs exist before real traffic. Matches from these requests are not logged. Safe to run while
+    /// the engine serves requests.
     /// </summary>
     public void WarmUp()
     {
-        var callback = Config.ErrorCallback;
-        var writer = Config.AuditLogWriter;
-        try
+        Compiled.GetAwaiter().GetResult();
+        string[] samples =
+        [
+            "q=hello+world&id=42&page=2",
+            "name=O%27Brien&comment=%3Cb%3Ehi%3C%2Fb%3E+select+1&path=..%2Fetc&cmd=ls+-la",
+        ];
+        foreach (var body in samples)
         {
-            Config.ErrorCallback = null;
-            Config.AuditLogWriter = null;
-            string[] samples =
-            [
-                "q=hello+world&id=42&page=2",
-                "name=O%27Brien&comment=%3Cb%3Ehi%3C%2Fb%3E+select+1&path=..%2Fetc&cmd=ls+-la",
-            ];
-            foreach (var body in samples)
-            {
-                using var tx = NewTransaction("warmup");
-                tx.RuleEngine = RuleEngineMode.DetectionOnly;
-                tx.ProcessConnection("127.0.0.1", 50000, "127.0.0.1", 80);
-                tx.ProcessUri("/warmup/index.html?" + body, "POST", "HTTP/1.1");
-                tx.AddRequestHeader("Host", "localhost");
-                tx.AddRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-                tx.AddRequestHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-                tx.AddRequestHeader("Cookie", "session=abc123; theme=dark");
-                tx.AddRequestHeader("Content-Type", "application/x-www-form-urlencoded");
-                tx.ProcessRequestHeaders();
-                tx.WriteRequestBody(System.Text.Encoding.ASCII.GetBytes(body));
-                tx.ProcessRequestBody();
-                tx.ProcessResponseHeaders(200, "HTTP/1.1");
-                tx.ProcessResponseBody();
-                tx.ProcessLogging();
-            }
-        }
-        finally
-        {
-            Config.ErrorCallback = callback;
-            Config.AuditLogWriter = writer;
+            using var tx = NewTransaction("warmup");
+            tx.SuppressLogs = true;
+            tx.RuleEngine = RuleEngineMode.DetectionOnly;
+            tx.ProcessConnection("127.0.0.1", 50000, "127.0.0.1", 80);
+            tx.ProcessUri("/warmup/index.html?" + body, "POST", "HTTP/1.1");
+            tx.AddRequestHeader("Host", "localhost");
+            tx.AddRequestHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+            tx.AddRequestHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            tx.AddRequestHeader("Cookie", "session=abc123; theme=dark");
+            tx.AddRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+            tx.ProcessRequestHeaders();
+            tx.WriteRequestBody(System.Text.Encoding.ASCII.GetBytes(body));
+            tx.ProcessRequestBody();
+            tx.ProcessResponseHeaders(200, "HTTP/1.1");
+            tx.ProcessResponseBody();
+            tx.ProcessLogging();
         }
     }
 
@@ -170,11 +174,12 @@ public sealed class WafEngine
 public sealed class WafBuilder
 {
     private readonly SecLangParser _parser;
+    private readonly RegexCache _regexCache = new();
 
     public WafBuilder(IConfigFileSystem? fileSystem = null, WafConfig? config = null)
     {
         Config = config ?? new WafConfig();
-        _parser = new SecLangParser(Config, fileSystem ?? PhysicalConfigFileSystem.Instance, new RegexCache());
+        _parser = new SecLangParser(Config, fileSystem ?? PhysicalConfigFileSystem.Instance, _regexCache);
     }
 
     public WafConfig Config { get; }
@@ -192,5 +197,16 @@ public sealed class WafBuilder
         return this;
     }
 
-    public WafEngine Build() => new(Config, _parser.Finish());
+    /// <summary>
+    /// Builds the engine. The @rx automata build in the background (<see cref="WafEngine.Compiled"/>); the engine is
+    /// usable at once.
+    /// </summary>
+    public WafEngine Build()
+    {
+        var rules = _parser.Finish();
+        var engine = new WafEngine(Config, rules, _parser.ReadsRuleCollection);
+        var cache = _regexCache;
+        engine.Compiled = Task.Run(cache.CompileAll);
+        return engine;
+    }
 }

@@ -53,6 +53,12 @@ public static class Transforms
 
     private static readonly char[] TrimChars = [' ', '\t', '\n', '\v', '\f', '\r'];
 
+    private static readonly SearchValues<char> CmdLineChanging = SearchValues.Create("\"'\\^,;\t\r\nABCDEFGHIJKLMNOPQRSTUVWXYZ");
+
+    private static readonly SearchValues<char> CompressWhitespaceChanging = SearchValues.Create("\t\n\v\f\r\u00A0\u00C2");
+
+    private static readonly SearchValues<char> RemoveWhitespaceChanging = SearchValues.Create(" \t\n\v\f\r");
+
     /// <summary>Finds a transformation by name (case-insensitive). "none" is handled by the parser.</summary>
     public static bool TryGet(string name, out Transformation transformation) =>
         Registry.TryGetValue(name, out transformation!);
@@ -65,7 +71,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         sb.Append(input, 0, pos);
         for (var i = pos; i < input.Length; i++)
         {
@@ -81,7 +87,7 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string UrlDecodeUni(string input)
@@ -92,7 +98,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         sb.Append(input, 0, pos);
         var i = pos;
         while (i < input.Length)
@@ -159,12 +165,12 @@ public static class Transforms
             i++;
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string UrlEncode(string input)
     {
-        var sb = new StringBuilder(input.Length * 3);
+        var sb = StringBuilderCache.Acquire(input.Length * 3);
         foreach (var c in input)
         {
             if (c == ' ')
@@ -181,7 +187,7 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string JsDecode(string input)
@@ -192,7 +198,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         sb.Append(input, 0, pos);
         var i = pos;
         var n = input.Length;
@@ -296,7 +302,7 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     private static int JsExtendedUnicodeEscapeLen(string input, int pos)
@@ -323,7 +329,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         sb.Append(input, 0, pos);
         var i = pos;
         var n = input.Length;
@@ -388,7 +394,7 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string EscapeSeqDecode(string input)
@@ -399,7 +405,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         sb.Append(input, 0, pos);
         var i = pos;
         var n = input.Length;
@@ -464,7 +470,7 @@ public static class Transforms
             i += 2;
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string HtmlEntityDecode(string input)
@@ -475,7 +481,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         sb.Append(input, 0, pos);
         Span<byte> utf8 = stackalloc byte[4];
         var i = pos;
@@ -493,7 +499,7 @@ public static class Transforms
             i = DecodeEntity(input, i, sb, utf8);
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     // Follows Go's html.UnescapeString (HTML5 rules, outside an attribute value). Returns the index after the entity.
@@ -626,7 +632,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length * 2);
+        var sb = StringBuilderCache.Acquire(input.Length * 2);
         sb.Append(input, 0, i);
         var bytes = ByteString.ToBytes(input);
         while (i < bytes.Length)
@@ -655,12 +661,26 @@ public static class Transforms
             i += consumed;
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string CmdLine(string input)
     {
-        var sb = new StringBuilder(input.Length);
+        // Unchanged when there is nothing to delete, fold or merge.
+        var span = input.AsSpan();
+        if (!span.ContainsAny(CmdLineChanging) && !span.Contains("  ", StringComparison.Ordinal)
+            && !span.Contains(" /", StringComparison.Ordinal) && !span.Contains(" (", StringComparison.Ordinal))
+        {
+            return input;
+        }
+
+        return CmdLineCore(input);
+    }
+
+    // The full transformation; CmdLine skips it when the input cannot change.
+    internal static string CmdLineCore(string input)
+    {
+        var sb = StringBuilderCache.Acquire(input.Length);
         var space = false;
         foreach (var a in input)
         {
@@ -692,12 +712,23 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string ReplaceComments(string input)
     {
-        var sb = new StringBuilder(input.Length);
+        if (!input.Contains("/*", StringComparison.Ordinal))
+        {
+            return input;
+        }
+
+        return ReplaceCommentsCore(input);
+    }
+
+    // The full transformation; ReplaceComments skips it when the input cannot change.
+    internal static string ReplaceCommentsCore(string input)
+    {
+        var sb = StringBuilderCache.Acquire(input.Length);
         var inComment = false;
         var i = 0;
         var n = input.Length;
@@ -732,12 +763,24 @@ public static class Transforms
             sb.Append(' ');
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string RemoveComments(string input)
     {
-        var sb = new StringBuilder(input.Length);
+        // "--" also covers "<!--".
+        if (!input.Contains("/*", StringComparison.Ordinal) && !input.Contains("--", StringComparison.Ordinal) && !input.Contains('#', StringComparison.Ordinal))
+        {
+            return input;
+        }
+
+        return RemoveCommentsCore(input);
+    }
+
+    // The full transformation; RemoveComments skips it when the input cannot change.
+    internal static string RemoveCommentsCore(string input)
+    {
+        var sb = StringBuilderCache.Acquire(input.Length);
         var inComment = false;
         var i = 0;
         var n = input.Length;
@@ -759,7 +802,7 @@ public static class Transforms
                 {
                     // Line comment: the rest of the input is dropped.
                     sb.Append(' ');
-                    return sb.ToString();
+                    return StringBuilderCache.GetStringAndRelease(sb);
                 }
                 else
                 {
@@ -795,12 +838,25 @@ public static class Transforms
             sb.Append(' ');
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string RemoveCommentsChar(string input)
     {
-        var sb = new StringBuilder(input.Length);
+        // "--" also covers "<!--" and "-->".
+        if (!input.Contains("/*", StringComparison.Ordinal) && !input.Contains("*/", StringComparison.Ordinal)
+            && !input.Contains("--", StringComparison.Ordinal) && !input.Contains('#', StringComparison.Ordinal))
+        {
+            return input;
+        }
+
+        return RemoveCommentsCharCore(input);
+    }
+
+    // The full transformation; RemoveCommentsChar skips it when the input cannot change.
+    internal static string RemoveCommentsCharCore(string input)
+    {
+        var sb = StringBuilderCache.Acquire(input.Length);
         var n = input.Length;
         for (var i = 0; i < n;)
         {
@@ -834,12 +890,24 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string CompressWhitespace(string input)
     {
-        var sb = new StringBuilder(input.Length);
+        // Unchanged when the only whitespace is single spaces (0xC2 may start a UTF-8 encoded space).
+        if (!input.AsSpan().ContainsAny(CompressWhitespaceChanging) && !input.Contains("  ", StringComparison.Ordinal))
+        {
+            return input;
+        }
+
+        return CompressWhitespaceCore(input);
+    }
+
+    // The full transformation; CompressWhitespace skips it when the input cannot change.
+    internal static string CompressWhitespaceCore(string input)
+    {
+        var sb = StringBuilderCache.Acquire(input.Length);
         var inWhitespace = false;
         var i = 0;
         var n = input.Length;
@@ -863,7 +931,7 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     // ASCII whitespace, a raw 0xA0 byte, or UTF-8 encoded U+0085 / U+00A0. Returns the byte length, or 0.
@@ -885,7 +953,18 @@ public static class Transforms
 
     public static string RemoveWhitespace(string input)
     {
-        var sb = new StringBuilder(input.Length);
+        if (!input.AsSpan().ContainsAny(RemoveWhitespaceChanging) && Ascii.IsValid(input))
+        {
+            return input;
+        }
+
+        return RemoveWhitespaceCore(input);
+    }
+
+    // The full transformation; RemoveWhitespace skips it when the input cannot change.
+    internal static string RemoveWhitespaceCore(string input)
+    {
+        var sb = StringBuilderCache.Acquire(input.Length);
         var bytes = ByteString.ToBytes(input);
         var i = 0;
         while (i < bytes.Length)
@@ -924,7 +1003,7 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string Lowercase(string input) => MapCase(input, upper: false);
@@ -950,7 +1029,7 @@ public static class Transforms
         }
 
         var bytes = ByteString.ToBytes(input);
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         Span<byte> utf8 = stackalloc byte[4];
         var i = 0;
         while (i < bytes.Length)
@@ -977,7 +1056,7 @@ public static class Transforms
             }
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string HexEncode(string input) =>
@@ -1027,7 +1106,7 @@ public static class Transforms
             return input;
         }
 
-        var sb = new StringBuilder(input.Length);
+        var sb = StringBuilderCache.Acquire(input.Length);
         int n = 0, x = 0;
         foreach (var raw in input)
         {
@@ -1089,10 +1168,21 @@ public static class Transforms
             sb.Append((char)((x >> 16) & 0xff)).Append((char)((x >> 8) & 0xff));
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     public static string NormalizePath(string input)
+    {
+        if (input.Length == 0)
+        {
+            return input;
+        }
+
+        return IsCleanPath(input) ? input : NormalizePathCore(input);
+    }
+
+    // The full transformation; NormalizePath skips it for a path that is already clean.
+    internal static string NormalizePathCore(string input)
     {
         if (input.Length == 0)
         {
@@ -1126,6 +1216,11 @@ public static class Transforms
 
     private static string StripWindowsAds(string data)
     {
+        if (!data.Contains(':', StringComparison.Ordinal))
+        {
+            return data;
+        }
+
         var prefix = string.Empty;
         if (data.Length >= 2 && data[1] == ':' && char.IsAsciiLetter(data[0]))
         {
@@ -1163,6 +1258,11 @@ public static class Transforms
 
     private static string StripWindowsTrailingDotsAndSpaces(string data)
     {
+        if (data.AsSpan().IndexOfAny('.', ' ') < 0)
+        {
+            return data;
+        }
+
         var segments = data.Split('/');
         var trimmable = segments.Any(seg => seg.Length > 0 && !IsAllDots(seg) && seg[^1] is '.' or ' ');
         if (!trimmable)
@@ -1170,7 +1270,7 @@ public static class Transforms
             return data;
         }
 
-        var sb = new StringBuilder(data.Length);
+        var sb = StringBuilderCache.Acquire(data.Length);
         var wroteAny = false;
         foreach (var raw in segments)
         {
@@ -1193,7 +1293,7 @@ public static class Transforms
             wroteAny = true;
         }
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     private static bool IsAllDots(string s)
@@ -1204,6 +1304,31 @@ public static class Transforms
             {
                 return false;
             }
+        }
+
+        return true;
+    }
+
+    // True when NormalizePath leaves the path as it is: no empty segment except a leading or trailing slash, and no
+    // "." or ".." segment.
+    private static bool IsCleanPath(string path)
+    {
+        var i = path[0] == '/' ? 1 : 0;
+        while (i < path.Length)
+        {
+            var end = path.IndexOf('/', i);
+            if (end < 0)
+            {
+                end = path.Length;
+            }
+
+            var length = end - i;
+            if (length == 0 || (length == 1 && path[i] == '.') || (length == 2 && path[i] == '.' && path[i + 1] == '.'))
+            {
+                return false;
+            }
+
+            i = end + 1;
         }
 
         return true;

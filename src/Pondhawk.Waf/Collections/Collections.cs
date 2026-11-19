@@ -50,7 +50,7 @@ public sealed class SingleCollection(Variable variable) : IWafCollection
 public class MapCollection(Variable variable) : IKeyedCollection
 {
     private readonly Dictionary<string, List<KeyValuePair<string, string>>> _data = new(StringComparer.Ordinal);
-    private readonly List<string> _order = [];
+    private readonly List<(string Lower, List<KeyValuePair<string, string>> Values)> _order = [];
 
     public Variable Variable { get; } = variable;
 
@@ -62,9 +62,9 @@ public class MapCollection(Variable variable) : IKeyedCollection
     {
         get
         {
-            foreach (var k in _order)
+            foreach (var (k, list) in _order)
             {
-                yield return new(k, _data[k]);
+                yield return new(k, list);
             }
         }
     }
@@ -105,7 +105,7 @@ public class MapCollection(Variable variable) : IKeyedCollection
         {
             list = [];
             _data[lower] = list;
-            _order.Add(lower);
+            _order.Add((lower, list));
         }
 
         list.Add(new(key, value));
@@ -125,7 +125,7 @@ public class MapCollection(Variable variable) : IKeyedCollection
         {
             list = [];
             _data[lower] = list;
-            _order.Add(lower);
+            _order.Add((lower, list));
         }
 
         list.Add(new(key, value));
@@ -145,7 +145,7 @@ public class MapCollection(Variable variable) : IKeyedCollection
         {
             list = [];
             _data[lower] = list;
-            _order.Add(lower);
+            _order.Add((lower, list));
         }
 
         foreach (var v in values)
@@ -162,7 +162,7 @@ public class MapCollection(Variable variable) : IKeyedCollection
         if (_data.Remove(lower, out var list))
         {
             Count -= list.Count;
-            _order.Remove(lower);
+            _order.RemoveAll(e => e.Lower == lower);
         }
     }
 
@@ -173,11 +173,26 @@ public class MapCollection(Variable variable) : IKeyedCollection
         Count = 0;
     }
 
+    /// <summary>The combined length of all keys and values.</summary>
+    internal int CombinedSize()
+    {
+        var total = 0;
+        foreach (var list in _data.Values)
+        {
+            foreach (var kv in list)
+            {
+                total += kv.Key.Length + kv.Value.Length;
+            }
+        }
+
+        return total;
+    }
+
     public virtual void FindAll(List<MatchData> output)
     {
-        foreach (var k in _order)
+        foreach (var (_, list) in _order)
         {
-            foreach (var kv in _data[k])
+            foreach (var kv in list)
             {
                 output.Add(Emit(kv));
             }
@@ -205,14 +220,14 @@ public class MapCollection(Variable variable) : IKeyedCollection
 
     public virtual void FindRegex(Regex regex, List<MatchData> output)
     {
-        foreach (var k in _order)
+        foreach (var (k, list) in _order)
         {
             if (!regex.IsMatch(k))
             {
                 continue;
             }
 
-            foreach (var kv in _data[k])
+            foreach (var kv in list)
             {
                 output.Add(Emit(kv));
             }
@@ -235,32 +250,31 @@ public sealed class NamesCollection(Variable variable, MapCollection source) : I
 
     public void FindAll(List<MatchData> output)
     {
-        foreach (var (_, list) in source.Entries)
-        {
-            foreach (var kv in list)
-            {
-                output.Add(new MatchData(Variable, kv.Key, kv.Key));
-            }
-        }
+        var start = output.Count;
+        source.FindAll(output);
+        ToNames(output, start);
     }
 
     public void FindString(string key, List<MatchData> output)
     {
-        var tmp = new List<MatchData>();
-        source.FindString(key, tmp);
-        foreach (var m in tmp)
-        {
-            output.Add(new MatchData(Variable, m.Key, m.Key));
-        }
+        var start = output.Count;
+        source.FindString(key, output);
+        ToNames(output, start);
     }
 
     public void FindRegex(Regex regex, List<MatchData> output)
     {
-        var tmp = new List<MatchData>();
-        source.FindRegex(regex, tmp);
-        foreach (var m in tmp)
+        var start = output.Count;
+        source.FindRegex(regex, output);
+        ToNames(output, start);
+    }
+
+    private void ToNames(List<MatchData> output, int start)
+    {
+        for (var i = start; i < output.Count; i++)
         {
-            output.Add(new MatchData(Variable, m.Key, m.Key));
+            var key = output[i].Key;
+            output[i] = new MatchData(Variable, key, key);
         }
     }
 }
@@ -339,13 +353,7 @@ public sealed class SizeCollection(Variable variable, params MapCollection[] sou
             var total = 0;
             foreach (var s in sources)
             {
-                foreach (var (_, list) in s.Entries)
-                {
-                    foreach (var kv in list)
-                    {
-                        total += kv.Key.Length + kv.Value.Length;
-                    }
-                }
+                total += s.CombinedSize();
             }
 
             return total;

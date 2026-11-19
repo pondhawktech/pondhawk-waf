@@ -17,7 +17,7 @@ public sealed class BodyProcessorException(string message) : Exception(message);
 public static class BodyProcessor
 {
     /// <summary>Runs the named processor. Returns false for an unknown processor name.</summary>
-    public static bool TryProcessRequest(string name, byte[] body, Transaction tx, BodyProcessorOptions options)
+    public static bool TryProcessRequest(string name, ReadOnlyMemory<byte> body, Transaction tx, BodyProcessorOptions options)
     {
         switch (name.ToUpperInvariant())
         {
@@ -25,7 +25,7 @@ public static class BodyProcessor
                 ProcessUrlEncoded(body, tx, options);
                 return true;
             case "MULTIPART":
-                Multipart.Process(body, tx, options);
+                Multipart.Process(body.Span, tx, options);
                 return true;
             case "JSON":
                 ProcessJson(body, tx, options, tx.Variables.ArgsPost);
@@ -34,7 +34,7 @@ public static class BodyProcessor
                 ProcessXml(body, tx, tx.Variables.RequestXml);
                 return true;
             case "RAW":
-                SetRequestBody(body, tx);
+                SetRequestBody(ByteString.FromBytes(body.Span), tx);
                 return true;
             default:
                 return false;
@@ -42,7 +42,7 @@ public static class BodyProcessor
     }
 
     /// <summary>Runs a response body processor (JSON fills RESPONSE_ARGS, XML fills RESPONSE_XML). False if unknown.</summary>
-    public static bool TryProcessResponse(string name, byte[] body, Transaction tx, int jsonDepthLimit, int argumentsLimit)
+    public static bool TryProcessResponse(string name, ReadOnlyMemory<byte> body, Transaction tx, int jsonDepthLimit, int argumentsLimit)
     {
         switch (name.ToUpperInvariant())
         {
@@ -57,25 +57,26 @@ public static class BodyProcessor
         }
     }
 
-    private static void SetRequestBody(byte[] body, Transaction tx)
+    // One byte string of the body serves both REQUEST_BODY and the parser.
+    private static void SetRequestBody(string body, Transaction tx)
     {
-        tx.Variables.RequestBody.Set(ByteString.FromBytes(body));
+        tx.Variables.RequestBody.Set(body);
         tx.Variables.RequestBodyLength.Set(body.Length.ToString(CultureInfo.InvariantCulture));
     }
 
-    private static void ProcessUrlEncoded(byte[] body, Transaction tx, BodyProcessorOptions options)
+    private static void ProcessUrlEncoded(ReadOnlyMemory<byte> body, Transaction tx, BodyProcessorOptions options)
     {
-        var text = ByteString.FromBytes(body);
+        var text = ByteString.FromBytes(body.Span);
         var truncated = UrlEncoded.Parse(text, '&', options.ArgumentsLimit, tx.AddPostRequestArgument);
         if (truncated)
         {
             tx.Variables.ArgumentsLimitReached.Set("1");
         }
 
-        SetRequestBody(body, tx);
+        SetRequestBody(text, tx);
     }
 
-    private static void ProcessJson(byte[] body, Transaction tx, BodyProcessorOptions options, Collections.MapCollection target)
+    private static void ProcessJson(ReadOnlyMemory<byte> body, Transaction tx, BodyProcessorOptions options, Collections.MapCollection target)
     {
         JsonDocument doc;
         try
@@ -202,7 +203,7 @@ public static class BodyProcessor
         }
     }
 
-    private static void ProcessXml(byte[] body, Transaction tx, Collections.MapCollection target)
+    private static void ProcessXml(ReadOnlyMemory<byte> body, Transaction tx, Collections.MapCollection target)
     {
         var attributes = new List<string>();
         var contents = new List<string>();
@@ -221,7 +222,9 @@ public static class BodyProcessor
         string? error = null;
         try
         {
-            using var stream = new MemoryStream(body);
+            using var stream = System.Runtime.InteropServices.MemoryMarshal.TryGetArray(body, out var segment)
+                ? new MemoryStream(segment.Array!, segment.Offset, segment.Count, writable: false)
+                : new MemoryStream(body.ToArray(), writable: false);
             using var reader = XmlReader.Create(stream, settings);
             while (reader.Read())
             {

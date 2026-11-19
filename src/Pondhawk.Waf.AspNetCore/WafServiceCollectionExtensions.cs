@@ -197,7 +197,21 @@ public static class WafServiceCollectionExtensions
         var waf = builder.Build();
         if (options.WarmUp)
         {
-            waf.WarmUp();
+            // In the background: the application starts serving while the regex automata build (WafEngine.Compiled).
+            var log = loggerFactory.CreateLogger("Pondhawk.Waf");
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    waf.WarmUp();
+                }
+#pragma warning disable CA1031 // A failed warm-up only costs latency; the engine still works.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    WafLog.WarmUpFailed(log, ex);
+                }
+            });
         }
 
         return waf;
@@ -240,4 +254,7 @@ internal static partial class WafLog
 
     [LoggerMessage(EventId = 15, Level = LogLevel.Error, Message = "Pondhawk WAF configuration changed but the new configuration is not valid; the current rules stay in force")]
     public static partial void ReloadFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 16, Level = LogLevel.Warning, Message = "Pondhawk WAF warm-up failed; the first requests may be slower")]
+    public static partial void WarmUpFailed(ILogger logger, Exception exception);
 }

@@ -14,6 +14,7 @@ Design and roadmap: [DESIGN.md](DESIGN.md). Usage: [README](../README.md).
 | `tests/Pondhawk.Waf.LibInjection.Tests` | All libinjection test vectors |
 | `tests/Pondhawk.Waf.CrsRegression` | CRS and plugin regression suite runner (Kestrel, raw TCP) |
 | `samples/Pondhawk.Waf.Sample` | Minimal API sample |
+| `benchmarks/Pondhawk.Waf.Benchmarks` | Startup, per-request, large-body and response measurements |
 
 ## Build and test
 
@@ -33,6 +34,8 @@ suite (paranoia level 4, DetectionOnly), and compares the logged rule ids. Resul
   before the middleware runs. Each has a reason.
 - The plugin tests (`plugin-tests/`, 459) run on a second server with every plugin loaded. 8 Nextcloud tests use
   expectations from `plugin-overrides.yaml` (differences from ModSecurity, see DESIGN.md).
+- Every value the regex prefilter rejects is checked against the regex. A prefilter that hides a match fails the
+  run (`PREFILTER MISSED A MATCH`).
 
 To update a plugin, copy `plugins/*.conf` and `LICENSE` from its release into
 `src/Pondhawk.Waf.CoreRuleSet/plugins/<name>/`, its `tests/regression/*/*.yaml` into `plugin-tests/<name>/`, and
@@ -45,13 +48,28 @@ re-opens a bypass fails there.
 
 ## Performance
 
-Measured in-process on the development machine (Release, full CRS):
+Measure with the benchmark project, in Release, on an idle machine:
 
-- Startup: about 3.5 s to load and compile CRS (668 rules), plus warm-up.
-- Per request: about 1.2 ms for a typical form POST; about 1.6 ms with a 10 KB HTML response inspected.
-- Per profile: Performance 0.6 ms, Balanced 1.2 ms, Strict 1.5 ms, Paranoid 1.4 ms (`ProfilePerfProbe`, skipped by
-  default; remove the `Skip` to run it).
-- Worst case: a body without files at the 1 MiB limit costs about 0.5-0.8 s of CPU and 150-250 MiB of allocation.
+```sh
+dotnet run -c Release --project benchmarks/Pondhawk.Waf.Benchmarks                 # all scenarios
+dotnet run -c Release --project benchmarks/Pondhawk.Waf.Benchmarks -- request alloc # selected ones
+```
+
+Wall times vary with machine load; CPU time and allocation are steadier. Set `DOTNET_gcServer=1` to match ASP.NET Core
+hosts. Milestone 4 results (full CRS, Balanced unless noted; CPU time per request; 4-core machine under load):
+
+| Scenario | 0.1.0 | Now |
+|---|---|---|
+| Form POST with a 10 KB HTML response | 1.37 ms, 878 KiB allocated | 0.52 ms, 250 KiB |
+| GET | 0.65 ms, 611 KiB | 0.31 ms, 151 KiB |
+| Profiles Performance / Strict / Paranoid | 0.49 / 1.42 / 1.48 ms | 0.25 / 0.56 / 0.59 ms |
+| 1 MiB URL-encoded body, 1000 arguments | 358 ms, 234 MiB | 186 ms, 82 MiB |
+| 1 MiB single argument | 404 ms, 214 MiB | 169 ms, 85 MiB |
+| 512 KiB HTML response (wall, through the middleware) | 31 ms, 9.7 MiB | 14 ms, 7.9 MiB |
+| Startup until the engine serves requests (cold process) | 2.6-4.0 s | 0.6 s |
+
+After startup the regex automata build in the background (`WafEngine.Compiled`, about 1.5-3 s here); a request that
+needs one before then builds it or waits for it.
 
 ## Releasing
 

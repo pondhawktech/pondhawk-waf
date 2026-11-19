@@ -99,7 +99,7 @@ value. `RuleEngine` (block or only log) is not part of a profile.
 | Request body limit | 13 MiB | 13 MiB | 8 MiB | 4 MiB |
 | Request body limit without files | 1 MiB | 1 MiB | 512 KiB | 128 KiB |
 | Arguments limit | 1000 | 1000 | 500 | 255 |
-| Time per request | 0.6 ms | 1.2 ms | 1.5 ms | 1.4 ms |
+| Time per request | 0.25 ms | 0.5 ms | 0.56 ms | 0.59 ms |
 | False positives / tuning effort | low | low | medium | high |
 
 - **Paranoia level** selects how many CRS rules run. Level 1 catches common attacks with few false positives. Each
@@ -301,6 +301,12 @@ A listed type also covers its family:
 A response that leaks a SQL error, a stack trace or a web shell is replaced with an empty 403 before the client
 receives any byte.
 
+With `RuleEngine = On`, an inspected response is held until it is complete (or reaches `ResponseBodyLimit`), so it
+reaches the client later. Memory peaks at about three times the held size while phase 4 runs: the bytes, plus the
+text the rules read. DetectionOnly cannot replace a
+response, so it does not hold it: the response streams to the client as the application writes it, and a copy is
+inspected. Set `HoldResponsesInDetectionOnly = true` to measure the latency that switching to `On` will add.
+
 ### Audit log to a file
 
 By default the audit log goes through `ILogger`, category `Pondhawk.Waf.Audit`. To write JSON lines to a file:
@@ -360,7 +366,8 @@ options.RuleFiles.Add("/etc/myapp/rules.conf");
 | `RuleFiles` | none | SecLang files from disk, loaded last |
 | `Bypass` | none | Predicate for requests that skip the WAF |
 | `UseCoreRuleSet` | `true` | Load the embedded CRS. The base configuration (body processing, limits) loads either way |
-| `WarmUp` | `true` | Run synthetic requests at startup, so the first real requests do not pay for regex compilation |
+| `WarmUp` | `true` | After the regexes are built, run synthetic requests in the background, so the first real requests do not pay for building DFA states |
+| `HoldResponsesInDetectionOnly` | `false` | In DetectionOnly, hold inspected responses as `On` does, instead of streaming them and inspecting a copy |
 | `ReloadOnChange` | `true` | Rebuild the engine when bound configuration changes ([reload](#settings-from-appsettingsjson)) |
 | `Configure` | none | Access to the engine builder (`WafBuilder`) after the options are applied |
 
@@ -375,7 +382,7 @@ exclusions. Later settings win.
 | `Pondhawk.Waf.Rules` | Warning | One ModSecurity-style line per matched rule |
 | `Pondhawk.Waf.Audit` | Information | One JSON entry per relevant request: a rule matched, the WAF blocked, or a 5xx |
 | `Pondhawk.Waf.AspNetCore.WafMiddleware` | Warning | One line per blocked request |
-| `Pondhawk.Waf` | Information, Warning, Error | Effective settings at startup and after a reload; a warning when the rule engine does not block; an error when a changed configuration does not build |
+| `Pondhawk.Waf` | Information, Warning, Error | Effective settings at startup and after a reload; a warning when the rule engine does not block or when warm-up fails; an error when a changed configuration does not build |
 
 ```json
 {
@@ -474,7 +481,7 @@ Failure behavior:
   a reload with errors keeps the current rules.
 - **Engine errors** during a request fail the request (500). The request never reaches the application uninspected.
 - **Cost:** every rule runs over every byte of a body without files. At the 1 MiB default, a worst-case body costs
-  about 0.5-0.8 s of CPU. Lower `RequestBodyNoFilesLimit` if your API does not need large bodies, and rate-limit
+  about 0.2-0.4 s of CPU. Lower `RequestBodyNoFilesLimit` if your API does not need large bodies, and rate-limit
   clients in front of the application.
 
 ## More

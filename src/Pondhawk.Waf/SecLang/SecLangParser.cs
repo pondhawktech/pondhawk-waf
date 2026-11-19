@@ -32,6 +32,23 @@ internal sealed class SecLangParser(WafConfig config, IConfigFileSystem fs, Rege
     private string _file = "<directives>";
     private string _dir = string.Empty;
     private int _line;
+    private bool _macroReadsRule;
+
+
+    /// <summary>
+    /// True when a rule reads the RULE collection (a RULE variable or a %{rule.*} macro). Without one, rules skip
+    /// filling RULE before they run: CRS never reads it, and filling it costs a macro expansion per rule.
+    /// </summary>
+    public bool ReadsRuleCollection =>
+        _macroReadsRule || _rules.Any(r => ChainOf(r).Any(link => link.Variables.Any(v => v.Variable == Variable.Rule)));
+
+    private static IEnumerable<Rule> ChainOf(Rule rule)
+    {
+        for (var r = rule; r is not null; r = r.Chain)
+        {
+            yield return r;
+        }
+    }
 
     public List<Rule> Finish()
     {
@@ -144,6 +161,7 @@ internal sealed class SecLangParser(WafConfig config, IConfigFileSystem fs, Rege
 
     private void EvaluateLine(string line)
     {
+        _macroReadsRule |= line.Contains("%{rule", StringComparison.OrdinalIgnoreCase);
         var space = line.IndexOf(' ', StringComparison.Ordinal);
         var directive = (space < 0 ? line : line[..space]).ToLowerInvariant();
         var opts = space < 0 ? string.Empty : line[(space + 1)..];
@@ -395,9 +413,16 @@ internal sealed class SecLangParser(WafConfig config, IConfigFileSystem fs, Rege
         return rule;
     }
 
+    // Ids of transformation chains, shared by rules with the same chain, for the transformation cache. A single step
+    // has the id of the one-step chain, which is the same computation.
     private int TransformationId(Rule rule)
     {
-        var key = string.Join(',', rule.Transformations.Select(t => t.Name.ToLowerInvariant()));
+        rule.TransformationStepIds = [.. rule.Transformations.Select(t => ChainId(t.Name.ToLowerInvariant()))];
+        return ChainId(string.Join(',', rule.Transformations.Select(t => t.Name.ToLowerInvariant())));
+    }
+
+    private int ChainId(string key)
+    {
         if (!_transformationIds.TryGetValue(key, out var id))
         {
             id = _transformationIds.Count + 1;
@@ -585,6 +610,7 @@ internal sealed class SecLangParser(WafConfig config, IConfigFileSystem fs, Rege
         rule.OperatorName = name;
         rule.OperatorData = arg;
         rule.Operator = OperatorRegistry.Create(name, new OperatorOptions(arg, _dir, fs, regexCache));
+
     }
 
     // ---- actions ----

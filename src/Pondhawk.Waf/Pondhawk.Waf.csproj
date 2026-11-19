@@ -7,6 +7,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Pondhawk.Waf.Tests" />
     <InternalsVisibleTo Include="Pondhawk.Waf.AspNetCore" />
+    <InternalsVisibleTo Include="Pondhawk.Waf.CrsRegression" />
+    <InternalsVisibleTo Include="Pondhawk.Waf.Benchmarks" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Pondhawk.Waf.LibInjection\Pondhawk.Waf.LibInjection.csproj" />

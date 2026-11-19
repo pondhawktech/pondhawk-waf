@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Pondhawk.Waf.Tests" />
+    <InternalsVisibleTo Include="Pondhawk.Waf.Benchmarks" />
   </ItemGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

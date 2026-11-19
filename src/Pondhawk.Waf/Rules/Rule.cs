@@ -106,6 +106,9 @@ public sealed class Rule
     /// <summary>Identifies the transformation chain for the transformation cache.</summary>
     internal int TransformationsId { get; set; }
 
+    /// <summary>For the transformation cache: the id of each step of the chain on its own.</summary>
+    internal int[] TransformationStepIds { get; set; } = [];
+
     public List<(string Name, IRuleAction Action)> Actions { get; } = [];
 
     public string File { get; set; } = string.Empty;
@@ -121,6 +124,29 @@ public sealed class Rule
     /// <summary>The id used in logs: the rule's own id, or the chain starter's.</summary>
     public int LogId => Id != 0 ? Id : ParentId;
 
+    private static readonly string[] SeverityNames =
+        ["", "EMERGENCY", "ALERT", "CRITICAL", "ERROR", "WARNING", "NOTICE", "INFO", "DEBUG"];
+
+    private Tuple<int, string>? _logIdText;
+
+    // RULE.id is set for every rule evaluation; format it once. Id and ParentId can change while rules load, so the
+    // cached text carries the id it was made from (one reference, safe to read from many threads).
+    private string LogIdString
+    {
+        get
+        {
+            var id = LogId;
+            var cached = _logIdText;
+            if (cached is null || cached.Item1 != id)
+            {
+                cached = Tuple.Create(id, id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                _logIdText = cached;
+            }
+
+            return cached.Item2;
+        }
+    }
+
     public void ClearTransformations() => Transformations.Clear();
 
     internal void Evaluate(int phase, Transaction tx, TransformationCache cache)
@@ -132,20 +158,23 @@ public sealed class Rule
     {
         tx.Capturing = Capture;
 
-        var ruleCol = tx.Variables.Rule;
-        ruleCol.Set("id", LogId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (Msg is not null)
+        if (tx.Waf.FillsRuleCollection)
         {
-            ruleCol.Set("msg", Msg.Expand(tx));
-        }
+            var ruleCol = tx.Variables.Rule;
+            ruleCol.Set("id", LogIdString);
+            if (Msg is not null)
+            {
+                ruleCol.Set("msg", Msg.Expand(tx));
+            }
 
-        ruleCol.Set("rev", Revision);
-        if (LogData is not null)
-        {
-            ruleCol.Set("logdata", LogData.Expand(tx));
-        }
+            ruleCol.Set("rev", Revision);
+            if (LogData is not null)
+            {
+                ruleCol.Set("logdata", LogData.Expand(tx));
+            }
 
-        ruleCol.Set("severity", Severity == Severity.Unset ? string.Empty : Severity.ToString().ToUpperInvariant());
+            ruleCol.Set("severity", SeverityNames[(int)Severity + 1]);
+        }
 
         List<RuleMatch>? matched = null;
         if (Operator is null)
@@ -164,60 +193,16 @@ public sealed class Rule
         else
         {
             var exceptions = tx.GetRuleRemovedTargets(LogId);
-            var values = new List<MatchData>();
-            var args = new List<string>(4);
-            foreach (var v in Variables)
+            var values = tx.RentMatchList();
+            var args = tx.RentStringList();
+            try
             {
-                values.Clear();
-                tx.GetField(v, exceptions, values);
-                var useCache = !v.IsCount && v.Variable is not (Variable.Tx or Variable.ArgsCombinedSize);
-                foreach (var arg in values)
-                {
-                    args.Clear();
-                    if (MultiMatch)
-                    {
-                        TransformMultiMatch(arg.Value, args);
-                    }
-                    else if (useCache && Transformations.Count > 0)
-                    {
-                        var key = (TransformationsId, arg.Value);
-                        if (!cache.TryGetValue(key, out var transformed))
-                        {
-                            transformed = Transform(arg.Value);
-                            cache.Add(key, transformed);
-                        }
-
-                        args.Add(transformed);
-                    }
-                    else
-                    {
-                        args.Add(Transform(arg.Value));
-                    }
-
-                    foreach (var carg in args)
-                    {
-                        var result = Operator.Evaluate(tx, carg);
-                        if (OperatorNegated)
-                        {
-                            result = !result;
-                        }
-
-                        if (!result)
-                        {
-                            continue;
-                        }
-
-                        var mr = new RuleMatch(new MatchData(arg.Variable, arg.Key, carg), chainLevel);
-                        MatchVariable(tx, mr);
-                        if (ParentId != 0 || !HasChain)
-                        {
-                            mr.Message = Msg?.Expand(tx) ?? string.Empty;
-                            mr.Data = LogData?.Expand(tx) ?? string.Empty;
-                        }
-
-                        (matched ??= []).Add(mr);
-                    }
-                }
+                matched = EvaluateVariables(tx, exceptions, values, args, chainLevel, cache);
+            }
+            finally
+            {
+                tx.Return(values);
+                tx.Return(args);
             }
         }
 
@@ -269,6 +254,76 @@ public sealed class Rule
         return matched;
     }
 
+    private List<RuleMatch>? EvaluateVariables(
+        Transaction tx,
+        List<(Variable Variable, VariableException Exception)>? exceptions,
+        List<MatchData> values,
+        List<string> args,
+        int chainLevel,
+        TransformationCache cache)
+    {
+        List<RuleMatch>? matched = null;
+        var op = Operator!;
+        foreach (var v in Variables)
+        {
+            values.Clear();
+            tx.GetField(v, exceptions, values);
+            var useCache = !v.IsCount && v.Variable is not (Variable.Tx or Variable.ArgsCombinedSize);
+            foreach (var arg in values)
+            {
+                args.Clear();
+                if (MultiMatch)
+                {
+                    TransformMultiMatch(arg.Value, args, useCache ? cache : null);
+                }
+                else if (Transformations.Count == 0)
+                {
+                    args.Add(arg.Value);
+                }
+                else if (useCache)
+                {
+                    if (!cache.TryGetValue(TransformationsId, arg.Value, out var transformed))
+                    {
+                        transformed = Transform(arg.Value, cache);
+                        cache.Add(TransformationsId, arg.Value, transformed);
+                    }
+
+                    args.Add(transformed);
+                }
+                else
+                {
+                    args.Add(Transform(arg.Value));
+                }
+
+                foreach (var carg in args)
+                {
+                    var result = op.Evaluate(tx, carg);
+                    if (OperatorNegated)
+                    {
+                        result = !result;
+                    }
+
+                    if (!result)
+                    {
+                        continue;
+                    }
+
+                    var mr = new RuleMatch(new MatchData(arg.Variable, arg.Key, carg), chainLevel);
+                    MatchVariable(tx, mr);
+                    if (ParentId != 0 || !HasChain)
+                    {
+                        mr.Message = Msg?.Expand(tx) ?? string.Empty;
+                        mr.Data = LogData?.Expand(tx) ?? string.Empty;
+                    }
+
+                    (matched ??= []).Add(mr);
+                }
+            }
+        }
+
+        return matched;
+    }
+
     private void MatchVariable(Transaction tx, RuleMatch match)
     {
         tx.MatchVariable(match.Match);
@@ -281,28 +336,48 @@ public sealed class Rule
         }
     }
 
-    private string Transform(string value)
+    private string Transform(string value, TransformationCache? cache = null)
     {
-        foreach (var (_, t) in Transformations)
+        for (var i = 0; i < Transformations.Count; i++)
         {
-            value = t(value);
+            value = TransformStep(i, value, cache);
         }
 
         return value;
     }
 
-    private void TransformMultiMatch(string value, List<string> output)
+    private void TransformMultiMatch(string value, List<string> output, TransformationCache? cache)
     {
         output.Add(value);
-        foreach (var (_, t) in Transformations)
+        for (var i = 0; i < Transformations.Count; i++)
         {
-            var transformed = t(value);
-            if (!string.Equals(transformed, value, StringComparison.Ordinal))
+            var transformed = TransformStep(i, value, cache);
+            if (!ReferenceEquals(transformed, value) && !string.Equals(transformed, value, StringComparison.Ordinal))
             {
                 output.Add(transformed);
                 value = transformed;
             }
         }
+    }
+
+    // Long values are cached step by step, so chains that share steps (most CRS chains start with urlDecodeUni or
+    // utf8toUnicode,urlDecodeUni) copy a large argument once per distinct step instead of once per chain.
+    private string TransformStep(int index, string value, TransformationCache? cache)
+    {
+        var transformation = Transformations[index].Function;
+        if (cache is null || value.Length < TransformationCache.StepCacheMinLength || index >= TransformationStepIds.Length)
+        {
+            return transformation(value);
+        }
+
+        var id = TransformationStepIds[index];
+        if (!cache.TryGetValue(id, value, out var transformed))
+        {
+            transformed = transformation(value);
+            cache.Add(id, value, transformed);
+        }
+
+        return transformed;
     }
 
     public override string ToString() => Id != 0 ? $"Rule {Id}" : $"Rule {File}:{Line}";

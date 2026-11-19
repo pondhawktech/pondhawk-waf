@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Pondhawk.Waf.Benchmarks/Pondhawk.Waf.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Pondhawk.Waf.Sample/Pondhawk.Waf.Sample.csproj" />
   </Folder>
