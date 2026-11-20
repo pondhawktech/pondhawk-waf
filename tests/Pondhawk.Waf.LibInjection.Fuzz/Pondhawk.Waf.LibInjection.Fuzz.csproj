@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <Description>Differential fuzzer: compares Pondhawk.Waf.LibInjection with libinjection-go input by input.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Pondhawk.Waf.LibInjection\Pondhawk.Waf.LibInjection.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Seeds: the libinjection test vectors. -->
+    <None Include="..\Pondhawk.Waf.LibInjection.Tests\TestData\test-*.txt" Link="Seeds\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Remove="oracle/**" />
+    <None Remove="oracle/**" />
+  </ItemGroup>
+</Project>

@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Pondhawk.Waf.LibInjection.Tests" />
+    <InternalsVisibleTo Include="Pondhawk.Waf.LibInjection.Fuzz" />
   </ItemGroup>
 
 </Project>

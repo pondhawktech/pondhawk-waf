@@ -32,6 +32,16 @@ jobs:
       - name: CRS regression suite
         run: dotnet run --project tests/Pondhawk.Waf.CrsRegression --configuration Release --no-build
 
+      # The libinjection port against libinjection-go (pinned in oracle/go.mod), on a fixed seed.
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/Pondhawk.Waf.LibInjection.Fuzz/oracle/go.mod
+          cache-dependency-path: tests/Pondhawk.Waf.LibInjection.Fuzz/oracle/go.sum
+
+      - name: libinjection differential fuzz
+        run: tests/Pondhawk.Waf.LibInjection.Fuzz/run.sh --count 1000000 --seed 1
+
       # A prerelease of the next patch, so a CI package never claims a released version.
       - name: Pack
         if: github.ref == 'refs/heads/main'

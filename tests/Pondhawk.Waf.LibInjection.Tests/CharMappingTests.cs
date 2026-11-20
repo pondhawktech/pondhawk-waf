@@ -12,11 +12,34 @@ public class CharMappingTests
     }
 
     [Fact]
-    public void CharsAboveLatin1BecomeNonAsciiByte()
+    public void CharsAboveLatin1BecomeUtf8Bytes()
     {
-        byte[] b = new byte[3];
-        LibInjection.ToBytes("\u0100\uFF1C\u20AC", b);
-        Assert.Equal(new byte[] { 0x80, 0x80, 0x80 }, b);
+        const string input = "\u0100\uFF1C\u20AC\uD83D\uDE00";
+        byte[] b = new byte[LibInjection.ByteLength(input)];
+        LibInjection.ToBytes(input, b);
+        Assert.Equal(System.Text.Encoding.UTF8.GetBytes(input), b);
+    }
+
+    [Fact]
+    public void LoneSurrogateBecomesReplacementChar()
+    {
+        const string input = "a\uD83Db\uDE00";
+        byte[] b = new byte[LibInjection.ByteLength(input)];
+        LibInjection.ToBytes(input, b);
+        Assert.Equal(new byte[] { (byte)'a', 0xEF, 0xBF, 0xBD, (byte)'b', 0xEF, 0xBF, 0xBD }, b);
+    }
+
+    [Theory]
+    // Expected values from libinjection-go v0.3.6 on the UTF-8 bytes of the input. Go's strings.ToUpper maps
+    // U+017F to S and U+0131 to I, so these are keywords.
+    [InlineData("1 union \u017Felect 1", "1UE1")]
+    [InlineData("1 un\u0131on \u017Felect 1", "1UE1")]
+    [InlineData("\u017Felect 1 from x", "E1kn")]
+    [InlineData("1' or \u0131f(1,1,1)--", "s&f(1")]
+    public void UnicodeCharsMatchGoOnUtf8(string input, string fingerprint)
+    {
+        Assert.True(LibInjection.IsSqli(input, out string fp));
+        Assert.Equal(fingerprint, fp);
     }
 
     [Fact]
@@ -32,6 +55,7 @@ public class CharMappingTests
         Assert.True(LibInjection.IsSqli("1' or '1'='1", out _));
         Assert.False(LibInjection.IsSqli("\u4F60\u597D", out _));
         Assert.False(LibInjection.IsXss("\u4F60\u597D <b>"));
+        Assert.True(LibInjection.IsXss("\uD83D\uDE00 <script>x</script>"));
     }
 
     [Fact]

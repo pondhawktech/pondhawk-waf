@@ -30,7 +30,7 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
 | Actions, ctl | `Actions/Actions.cs` | `internal/actions` |
 | Body processors | `BodyProcessors/*` | `internal/bodyprocessors` |
 | SecLang parser | `SecLang/SecLangParser.cs` | `internal/seclang` |
-| libinjection | `Pondhawk.Waf.LibInjection` | `libinjection-go` |
+| libinjection | `Pondhawk.Waf.LibInjection` | `libinjection-go` v0.3.6 (differential fuzzer: `tests/Pondhawk.Waf.LibInjection.Fuzz`) |
 
 ### Decisions
 
