@@ -391,7 +391,7 @@ exclusions. Later settings win.
 | `Pondhawk.Waf.Rules` | Warning | One ModSecurity-style line per matched rule |
 | `Pondhawk.Waf.Audit` | Information | One JSON entry per relevant request: a rule matched, the WAF blocked, or a 5xx |
 | `Pondhawk.Waf.AspNetCore.WafMiddleware` | Warning | One line per blocked request |
-| `Pondhawk.Waf` | Information, Warning, Error | Effective settings at startup and after a reload; a warning when the rule engine does not block or when warm-up fails; an error when a changed configuration does not build |
+| `Pondhawk.Waf` | Information, Warning, Error | Effective settings at startup and after a reload; a warning when the rule engine does not block, when warm-up fails, or when the services are registered without `UsePondhawkWaf()`; an error when a changed configuration does not build |
 
 ```json
 {
