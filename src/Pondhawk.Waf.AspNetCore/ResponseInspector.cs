@@ -23,6 +23,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     private readonly HttpContext _context;
     private readonly Transaction _tx;
     private readonly IHttpResponseBodyFeature _inner;
+    private readonly InspectedResponseFeature _response;
     private readonly bool _holdInDetectionOnly;
     private PipeWriter? _writer;
     private State _state = State.NotStarted;
@@ -30,11 +31,12 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     // Held bytes (in the transaction's buffer) not yet sent.
     private bool _heldPending;
 
-    public ResponseInspector(HttpContext context, Transaction tx, IHttpResponseBodyFeature inner, bool holdInDetectionOnly = false)
+    public ResponseInspector(HttpContext context, Transaction tx, IHttpResponseBodyFeature inner, InspectedResponseFeature response, bool holdInDetectionOnly = false)
     {
         _context = context;
         _tx = tx;
         _inner = inner;
+        _response = response;
         _holdInDetectionOnly = holdInDetectionOnly;
     }
 
@@ -54,6 +56,9 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         /// <summary>Phase 3 or 4 interrupted; bytes are dropped and the middleware writes the error response.</summary>
         Blocked,
     }
+
+    /// <summary>True once phase 3 ran: the application can no longer change the status or headers.</summary>
+    public bool ResponseStarted => _state != State.NotStarted;
 
     /// <summary>The interruption raised in phase 3 or 4, if any. The middleware writes the error response.</summary>
     public Interruption? Interruption { get; private set; }
@@ -86,7 +91,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        BeginResponse();
+        await BeginResponseAsync();
         if (_state is State.PassThrough or State.Streaming)
         {
             await _inner.StartAsync(cancellationToken);
@@ -162,7 +167,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
 
     public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        BeginResponse();
+        await BeginResponseAsync();
         switch (_state)
         {
             case State.PassThrough:
@@ -222,7 +227,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
             await _writer.FlushAsync(_context.RequestAborted);
         }
 
-        BeginResponse();
+        await BeginResponseAsync();
         if (_state is State.Holding or State.Streaming)
         {
             Interruption = _tx.ProcessResponseBody();
@@ -238,7 +243,8 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         }
     }
 
-    // Phase 3, once, when the response starts. Decides whether the body is held, streamed with a copy, or streamed.
+    // Phase 3, once, when the response starts. The application's OnStarting callbacks run first, as the server would
+    // run them, so the headers they add are inspected. A synchronous write waits for them, as the server does.
     private void BeginResponse()
     {
         if (_state != State.NotStarted)
@@ -246,6 +252,40 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
             return;
         }
 
+        if (_response.HasOnStarting)
+        {
+            _response.RunOnStartingAsync().GetAwaiter().GetResult();
+        }
+
+        BeginResponseCore();
+    }
+
+    private async ValueTask BeginResponseAsync()
+    {
+        if (_state != State.NotStarted)
+        {
+            return;
+        }
+
+        if (_response.HasOnStarting)
+        {
+            await _response.RunOnStartingAsync();
+        }
+
+        BeginResponseCore();
+    }
+
+    // Decides whether the body is held, streamed with a copy, or streamed.
+    private void BeginResponseCore()
+    {
+        // A callback that wrote to the body started the response already.
+        if (_state != State.NotStarted)
+        {
+            return;
+        }
+
+        // From here the status and headers are read-only: they are what phase 3 inspects.
+        _response.MarkStarted();
         var response = _context.Response;
         foreach (var header in response.Headers)
         {

@@ -62,7 +62,7 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
 
 | Area | Coraza | Pondhawk |
 |---|---|---|
-| Regex `.` and counted repeats (`.{1,10}`, `[^=]{1,10}`) on UTF-8 | one rune | one byte: a repeat bound matches fewer characters of non-ASCII text |
+| Regex on UTF-8, pattern with a non-ASCII literal (none in CRS) | one rune per `.` or class | one byte: `.{1,10}` matches fewer characters of non-ASCII text. Pure-ASCII patterns match runes and patterns with byte escapes 0x80-0xFF match bytes, as in Coraza |
 | Multipart | Go `mime/multipart`: delimiters after a bare LF | strict error (400) wherever Go and ASP.NET Core's `MultipartReader` would split the body differently |
 | JSON | flattens any document | rejects key paths totalling more than 4 × the body size, and invalid strings (lone surrogates, invalid UTF-8) |
 | Response MIME types | exact match | `*/json`, `*+json`, `*/xml`, `*+xml` and missing `Content-Type` match the listed families; UTF-16/32 transcoded |
@@ -191,6 +191,21 @@ An adversarial review (four reviewers: middleware, body parsing, rule engine, co
    cached on disk (.NET does not serialize them).
 4. Response bodies: held once, in the transaction's buffer, sized from `Content-Length`. DetectionOnly streams
    responses and inspects a copy.
+
+### Milestone 5 (done): security review findings
+
+1. `@rx` counts UTF-8 characters, as Go's regexp does in Coraza (#13). A pattern without non-ASCII characters or
+   byte escapes 0x80-0xFF sees each UTF-8 character, and each invalid byte, as one private-use char
+   (`RegexCache.CollapseUtf8`); captures map back to the original bytes. Patterns with byte escapes match bytes, as
+   Coraza's binary regexes do (10 CRS patterns).
+2. Relative paths in `Directives`, `DirectivesAfterRules` and `RuleFiles` resolve against the content root
+   (`IHostEnvironment.ContentRootPath`), not the working directory (#14).
+3. A response JSON document over the arguments limit no longer sets the request variable `ARGUMENTS_LIMIT_REACHED`
+   (#17).
+4. `InspectedResponseFeature` makes a held response behave as started from phase 3 on (#19, #20): the application's
+   `OnStarting` callbacks run before phase 3; afterwards the status and headers are read-only and `HasStarted` is
+   true. When the application throws after it started a response that has not reached the server, the middleware
+   aborts the connection, so an exception handler outside the WAF cannot replace it with an uninspected page.
 
 ### Later
 

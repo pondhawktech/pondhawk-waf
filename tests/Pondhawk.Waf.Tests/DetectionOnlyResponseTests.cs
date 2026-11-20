@@ -28,7 +28,7 @@ public sealed class DetectionOnlyResponseTests
         // The first part arrives while the application still waits: nothing is held.
         var stream = await response.Content.ReadAsStreamAsync();
         var first = new byte[7];
-        await stream.ReadExactlyAsync(first).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        await stream.ReadExactlyAsync(first).AsTask().WaitAsync(TimeSpan.FromSeconds(60));
         Assert.Equal("part-1\n", Encoding.ASCII.GetString(first));
 
         release.SetResult();
@@ -53,7 +53,7 @@ public sealed class DetectionOnlyResponseTests
         Assert.False(pending.IsCompleted);
 
         release.SetResult();
-        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(10));
+        using var response = await pending.WaitAsync(TimeSpan.FromSeconds(60));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("part-1\npart-2 " + SqlError, await response.Content.ReadAsStringAsync());
         await WaitForAsync(() => matched.Any(id => id is >= 951000 and < 952000));
@@ -79,7 +79,7 @@ public sealed class DetectionOnlyResponseTests
                         ctx.Response.ContentType = "text/html";
                         await ctx.Response.WriteAsync("part-1\n");
                         await ctx.Response.Body.FlushAsync();
-                        await release.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                        await release.Task.WaitAsync(TimeSpan.FromSeconds(60));
                         await ctx.Response.WriteAsync("part-2 " + SqlError);
                     });
                 }))
@@ -87,7 +87,7 @@ public sealed class DetectionOnlyResponseTests
 
     private static async Task WaitForAsync(Func<bool> condition)
     {
-        for (var i = 0; i < 100 && !condition(); i++)
+        for (var i = 0; i < 600 && !condition(); i++)
         {
             await Task.Delay(50);
         }

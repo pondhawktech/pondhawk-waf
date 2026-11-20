@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
@@ -15,6 +16,7 @@ public sealed class WafEngineProvider : IDisposable
     private readonly IOptionsFactory<WafOptions> _factory;
     private readonly ILoggerFactory _loggerFactory;
     private readonly WafMetrics _metrics;
+    private readonly string? _contentRoot;
     private readonly ILogger _logger;
     private readonly List<IDisposable> _subscriptions = [];
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -29,7 +31,8 @@ public sealed class WafEngineProvider : IDisposable
         IOptionsFactory<WafOptions> factory,
         IEnumerable<IOptionsChangeTokenSource<WafOptions>> changeSources,
         ILoggerFactory loggerFactory,
-        WafMetrics metrics)
+        WafMetrics metrics,
+        IHostEnvironment? environment = null)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentNullException.ThrowIfNull(changeSources);
@@ -37,9 +40,10 @@ public sealed class WafEngineProvider : IDisposable
         _factory = factory;
         _loggerFactory = loggerFactory;
         _metrics = metrics;
+        _contentRoot = environment?.ContentRootPath;
         _logger = loggerFactory.CreateLogger("Pondhawk.Waf");
         var options = factory.Create(Options.DefaultName);
-        _current = new WafSnapshot(WafServiceCollectionExtensions.CreateEngine(options, loggerFactory, metrics), options, options.Resolve(), 0);
+        _current = new WafSnapshot(WafServiceCollectionExtensions.CreateEngine(options, loggerFactory, metrics, _contentRoot), options, options.Resolve(), 0);
         if (options.ReloadOnChange)
         {
             foreach (var source in changeSources)
@@ -113,7 +117,7 @@ public sealed class WafEngineProvider : IDisposable
             {
                 options = _factory.Create(Options.DefaultName);
                 var settings = options.Resolve();
-                var engine = WafServiceCollectionExtensions.CreateEngine(options, _loggerFactory, _metrics);
+                var engine = WafServiceCollectionExtensions.CreateEngine(options, _loggerFactory, _metrics, _contentRoot);
 
                 // Swap in a fully built engine, so requests after a reload do not wait for regex automata.
                 await engine.Compiled.ConfigureAwait(false);

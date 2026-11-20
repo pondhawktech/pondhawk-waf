@@ -281,7 +281,7 @@ options.DirectivesAfterRules = """
 Rules from files on disk:
 
 ```csharp
-options.RuleFiles.Add(Path.Combine(builder.Environment.ContentRootPath, "waf/custom-rules.conf"));
+options.RuleFiles.Add("waf/custom-rules.conf"); // Relative to the content root.
 ```
 
 ### Response inspection
@@ -306,6 +306,15 @@ reaches the client later. Memory peaks at about three times the held size while 
 text the rules read. DetectionOnly cannot replace a
 response, so it does not hold it: the response streams to the client as the application writes it, and a copy is
 inspected. Set `HoldResponsesInDetectionOnly = true` to measure the latency that switching to `On` will add.
+
+Phase 3 inspects the status and headers when the response starts: at the first write, `StartAsync`, or when the
+application returns. From then on the response behaves as started, even while it is held:
+
+- `OnStarting` callbacks registered by the application run before phase 3, so the headers they add are inspected.
+- Changing the status or a header afterwards throws `InvalidOperationException`, as on a started response.
+- If the application throws after it started a response, the connection is aborted, as it would be without the WAF.
+  An exception handler outside the WAF cannot send an uninspected error page in its place. An error page for an
+  exception thrown before the response started is written outside the WAF and is not inspected.
 
 ### Audit log to a file
 
@@ -363,7 +372,7 @@ options.RuleFiles.Add("/etc/myapp/rules.conf");
 | `Plugins` | none | CRS application plugins ([Application plugins](#application-plugins)) |
 | `Directives` | none | SecLang loaded after the profile settings, before the CRS rules: runtime (`ctl`) exclusions, your rules |
 | `DirectivesAfterRules` | none | SecLang loaded after the CRS rules: `SecRuleRemoveById`, `SecRuleUpdateTargetBy*` |
-| `RuleFiles` | none | SecLang files from disk, loaded last |
+| `RuleFiles` | none | SecLang files from disk, loaded last. Relative paths (also in `Include` and `@pmFromFile`) resolve against the content root |
 | `Bypass` | none | Predicate for requests that skip the WAF |
 | `UseCoreRuleSet` | `true` | Load the embedded CRS. The base configuration (body processing, limits) loads either way |
 | `WarmUp` | `true` | After the regexes are built, run synthetic requests in the background, so the first real requests do not pay for building DFA states |

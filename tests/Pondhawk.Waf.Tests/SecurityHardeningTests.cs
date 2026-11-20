@@ -468,6 +468,104 @@ public sealed class SecurityHardeningTests
         Assert.Equal(2, cache.Count);
     }
 
+    // ----- Milestone 5 -----
+
+    [Fact]
+    public void TruncatedResponseJsonDoesNotSetTheRequestLimitFlag()
+    {
+        var waf = WafEngine.FromDirectives("""
+            SecRuleEngine On
+            SecResponseBodyAccess On
+            SecResponseBodyMimeType application/json
+            SecArgumentsLimit 5
+            SecRule RESPONSE_HEADERS:Content-Type "@beginsWith application/json" "id:1,phase:3,pass,nolog,ctl:responseBodyProcessor=JSON"
+            """);
+        using var tx = waf.NewTransaction();
+        tx.ProcessConnection("127.0.0.1", 1, "127.0.0.1", 80);
+        tx.ProcessUri("/", "GET", "HTTP/1.1");
+        tx.ProcessRequestHeaders();
+        tx.ProcessRequestBody();
+        tx.AddResponseHeader("Content-Type", "application/json");
+        tx.ProcessResponseHeaders(200, "HTTP/1.1");
+        tx.WriteResponseBody(Encoding.ASCII.GetBytes("[1,2,3,4,5,6,7,8,9,10]"));
+        tx.ProcessResponseBody();
+        Assert.Equal(5, tx.Variables.ResponseArgs.Count);
+        Assert.Equal("0", tx.Variables.ArgumentsLimitReached.Value);
+    }
+
+    [Fact]
+    public void RelativeRulePathsResolveAgainstTheContentRoot()
+    {
+        var root = Directory.CreateTempSubdirectory("pondhawk-waf-root").FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "waf"));
+            File.WriteAllText(Path.Combine(root, "waf", "words.txt"), "forbiddenword\n");
+            File.WriteAllText(Path.Combine(root, "waf", "file-words.txt"), "fileword\n");
+            File.WriteAllText(Path.Combine(root, "waf", "rules.conf"), "SecRule ARGS \"@pmFromFile file-words.txt\" \"id:10001,phase:1,deny,status:403\"\n");
+            File.WriteAllText(Path.Combine(root, "waf", "more.conf"), "SecRule ARGS \"@streq other\" \"id:10002,phase:1,deny,status:403\"\n");
+            var o = new WafOptions { WarmUp = false, UseCoreRuleSet = false, RuleEngine = RuleEngineMode.On };
+            o.RuleFiles.Add("waf/rules.conf");
+            // Paths in a file resolve against that file's directory; paths in Directives against the content root.
+            o.Directives = "Include waf/more.conf\nSecRule ARGS \"@pmFromFile waf/words.txt\" \"id:10003,phase:1,deny,status:403\"";
+            var waf = WafServiceCollectionExtensions.CreateEngine(o, Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance, contentRoot: root);
+            Assert.Equal(10001, Get(waf, "/?q=fileword"));
+            Assert.Equal(10003, Get(waf, "/?q=forbiddenword"));
+            Assert.Equal(10002, Get(waf, "/?q=other"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        static int? Get(WafEngine waf, string uri)
+        {
+            using var tx = waf.NewTransaction();
+            tx.ProcessConnection("127.0.0.1", 1, "127.0.0.1", 80);
+            tx.ProcessUri(uri, "GET", "HTTP/1.1");
+            return tx.ProcessRequestHeaders()?.RuleId;
+        }
+    }
+
+    // Coraza's Go regexp counts UTF-8 characters (runes) for patterns without byte escapes 0x80-0xFF (#13).
+    [Theory]
+    [InlineData(@"^[^=]{1,10}=", "%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9=", true)] // 6 characters, 12 bytes.
+    [InlineData(@"^.{3}$", "%C3%A9%E2%82%AC%F0%9F%98%80", true)] // 2-, 3- and 4-byte characters.
+    [InlineData(@"^.{3}$", "%FF%FEa", true)] // Each invalid byte is one rune (U+FFFD in Go).
+    [InlineData(@"^.{3}$", "%E2%82a", true)] // A truncated sequence: two invalid bytes.
+    [InlineData(@"^.{2}$", "%ED%A0%80", false)] // An encoded surrogate is three invalid bytes.
+    [InlineData(@"^\w$", "%C3%A9", false)] // \w stays ASCII.
+    [InlineData(@"(?i)\bselect\b", "%C3%A9select", true)] // A non-ASCII character is not a word character.
+    [InlineData(@"(?i)^.select", "%C3%A9select", true)]
+    [InlineData(@"\xc3\xa9", "%C3%A9", true)] // Byte escapes keep byte semantics, as in Coraza.
+    [InlineData(@"^\xc3.$", "%C3%A9", true)]
+    public void RxCountsUtf8CharactersUnlessThePatternMatchesBytes(string pattern, string arg, bool matches)
+    {
+        var waf = WafEngine.FromDirectives($$"""
+            SecRuleEngine On
+            SecRule ARGS:a "@rx {{pattern}}" "id:1,phase:1,deny,status:403"
+            """);
+        using var tx = waf.NewTransaction();
+        tx.ProcessConnection("127.0.0.1", 1, "127.0.0.1", 80);
+        tx.ProcessUri("/?a=" + arg, "GET", "HTTP/1.1");
+        Assert.Equal(matches, tx.ProcessRequestHeaders() is not null);
+    }
+
+    [Fact]
+    public void RuneCapturesAreTheOriginalBytes()
+    {
+        var waf = WafEngine.FromDirectives("""
+            SecRuleEngine On
+            SecRule ARGS:a "@rx ^(.{2})x(.)$" "id:1,phase:1,pass,capture,setvar:'tx.first=%{tx.1}',setvar:'tx.second=%{tx.2}'"
+            """);
+        using var tx = waf.NewTransaction();
+        tx.ProcessConnection("127.0.0.1", 1, "127.0.0.1", 80);
+        tx.ProcessUri("/?a=%C3%A9%FFx%E2%82%AC", "GET", "HTTP/1.1");
+        tx.ProcessRequestHeaders();
+        Assert.Equal("\u00c3\u00a9\u00ff", tx.Variables.Tx.GetFirst("first"));
+        Assert.Equal("\u00e2\u0082\u00ac", tx.Variables.Tx.GetFirst("second"));
+    }
+
     // ----- Helpers -----
 
     private static WafEngine Engine(Action<WafOptions> configure)
