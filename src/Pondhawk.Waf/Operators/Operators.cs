@@ -27,7 +27,7 @@ public static class OperatorRegistry
     private static readonly FrozenDictionary<string, Func<OperatorOptions, IOperator>> Factories =
         new Dictionary<string, Func<OperatorOptions, IOperator>>(StringComparer.OrdinalIgnoreCase)
         {
-            ["rx"] = o => new RxOperator(o.RegexCache.GetDeferred(o.Arguments), RegexCache.UsesWordBoundary(o.Arguments), o.RegexCache.GetPrefilter(o.Arguments)),
+            ["rx"] = o => RxOperator.Create(o.Arguments, o.RegexCache),
             ["pm"] = o => new PmOperator(o.Arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries)),
             ["pmFromFile"] = o => new PmOperator(ReadDataFile(o)),
             ["pmf"] = o => new PmOperator(ReadDataFile(o)),
@@ -405,6 +405,134 @@ public sealed class RegexCache
         return false;
     }
 
+    /// <summary>
+    /// True when the pattern matches bytes, not UTF-8 characters: it contains a non-ASCII character or an escape for a
+    /// byte 0x80-0xFF (\x80, \x{ff}). Coraza compiles such patterns as binary regexes too; all others match runes.
+    /// </summary>
+    internal static bool MatchesBytes(string pattern)
+    {
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            var c = pattern[i];
+            if (c > 0x7f)
+            {
+                return true;
+            }
+
+            if (c != '\\' || i + 1 >= pattern.Length)
+            {
+                continue;
+            }
+
+            if (pattern[i + 1] == 'x')
+            {
+                if (i + 3 < pattern.Length && ByteString.IsHex(pattern[i + 2]) && ByteString.IsHex(pattern[i + 3])
+                    && ((ByteString.HexValue(pattern[i + 2]) << 4) | ByteString.HexValue(pattern[i + 3])) >= 0x80)
+                {
+                    return true;
+                }
+
+                if (i + 2 < pattern.Length && pattern[i + 2] == '{')
+                {
+                    var close = pattern.IndexOf('}', i + 3);
+                    if (close > i + 3 && int.TryParse(pattern.AsSpan(i + 3, close - i - 3), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var code) && code >= 0x80)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            i++;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Stands for one non-ASCII character in values matched by rune patterns (see <see cref="CollapseUtf8"/>). Private
+    /// use: not a word, digit or space character, and not case-folded to anything.
+    /// </summary>
+    internal const char NonAsciiPlaceholder = '\ue000';
+
+    /// <summary>
+    /// For patterns that match UTF-8 characters (Go regexp semantics): replaces each UTF-8 encoded character, and each
+    /// byte that is not valid UTF-8 (Go reads it as one U+FFFD rune), with one <see cref="NonAsciiPlaceholder"/>. A
+    /// pure-ASCII pattern cannot tell non-ASCII characters apart (\w, \d, \s are ASCII classes), so `.`, `[^=]{1,10}`
+    /// and other counts see one character where the bytes have two to four. ASCII input is returned as is.
+    /// </summary>
+    internal static string CollapseUtf8(string value)
+    {
+        var first = value.AsSpan().IndexOfAnyExceptInRange('\0', '\u007f');
+        if (first < 0)
+        {
+            return value;
+        }
+
+        var sb = new StringBuilder(value.Length);
+        sb.Append(value, 0, first);
+        for (var i = first; i < value.Length;)
+        {
+            if (value[i] <= 0x7f)
+            {
+                sb.Append(value[i]);
+                i++;
+            }
+            else
+            {
+                sb.Append(NonAsciiPlaceholder);
+                i += Utf8Length(value, i);
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>For each char of <see cref="CollapseUtf8"/>(value), its index in value; the last entry is value.Length.</summary>
+    internal static int[] CollapseUtf8Offsets(string value)
+    {
+        var offsets = new List<int>(value.Length + 1);
+        for (var i = 0; i < value.Length;)
+        {
+            offsets.Add(i);
+            i += value[i] <= 0x7f ? 1 : Utf8Length(value, i);
+        }
+
+        offsets.Add(value.Length);
+        return [.. offsets];
+    }
+
+    // Bytes in one UTF-8 character starting at value[i] (chars are bytes), or 1 for a byte that does not start a valid
+    // sequence, as Go's utf8.DecodeRune reads it: no overlong forms, surrogates or code points above U+10FFFF.
+    private static int Utf8Length(string value, int i)
+    {
+        var b0 = value[i];
+        var (length, lo, hi) = b0 switch
+        {
+            >= '\u00c2' and <= '\u00df' => (2, 0x80, 0xbf),
+            '\u00e0' => (3, 0xa0, 0xbf),
+            >= '\u00e1' and <= '\u00ec' or '\u00ee' or '\u00ef' => (3, 0x80, 0xbf),
+            '\u00ed' => (3, 0x80, 0x9f),
+            '\u00f0' => (4, 0x90, 0xbf),
+            >= '\u00f1' and <= '\u00f3' => (4, 0x80, 0xbf),
+            '\u00f4' => (4, 0x80, 0x8f),
+            _ => (1, 0, 0),
+        };
+        if (length == 1 || i + length > value.Length || value[i + 1] < lo || value[i + 1] > hi)
+        {
+            return 1;
+        }
+
+        for (var k = 2; k < length; k++)
+        {
+            if (value[i + k] is < '\u0080' or > '\u00bf')
+            {
+                return 1;
+            }
+        }
+
+        return length;
+    }
+
     [ThreadStatic]
     private static string? _lastInput;
 
@@ -475,12 +603,28 @@ public sealed class RegexCache
     };
 }
 
-internal sealed class RxOperator(Lazy<Regex> regex, bool remapHighBytes = false, RegexPrefilter? prefilter = null) : IOperator
+/// <summary>
+/// @rx. A pattern without non-ASCII characters or byte escapes matches UTF-8 characters, as Go's regexp does in Coraza:
+/// the value is matched with each non-ASCII character collapsed to one char (<see cref="RegexCache.CollapseUtf8"/>).
+/// Other patterns match bytes; those with \b or \B see bytes 0x80-0xFF remapped so that they are not word characters.
+/// </summary>
+internal sealed class RxOperator(Lazy<Regex> regex, bool remapHighBytes = false, RegexPrefilter? prefilter = null, bool matchesRunes = false) : IOperator
 {
-    public RxOperator(Regex regex, bool remapHighBytes = false, RegexPrefilter? prefilter = null)
-        : this(new Lazy<Regex>(regex), remapHighBytes, prefilter)
+    public RxOperator(Regex regex, bool remapHighBytes = false, RegexPrefilter? prefilter = null, bool matchesRunes = false)
+        : this(new Lazy<Regex>(regex), remapHighBytes, prefilter, matchesRunes)
     {
     }
+
+    public static RxOperator Create(string pattern, RegexCache cache)
+    {
+        var bytes = RegexCache.MatchesBytes(pattern);
+
+        // Collapsed values hold no bytes 0x80-0xFF, so rune patterns need no remapping for \b.
+        return new RxOperator(cache.GetDeferred(pattern), bytes && RegexCache.UsesWordBoundary(pattern), cache.GetPrefilter(pattern), !bytes);
+    }
+
+    /// <summary>True when the pattern matches UTF-8 characters rather than bytes.</summary>
+    internal bool MatchesRunes => matchesRunes;
 
     public Regex Regex => regex.Value;
 
@@ -495,8 +639,10 @@ internal sealed class RxOperator(Lazy<Regex> regex, bool remapHighBytes = false,
 
     public bool Evaluate(Transaction tx, string value)
     {
-        // The prefilter reads ASCII literals only, which high-byte remapping leaves in place.
-        if (Prefilter is not null && !Prefilter.MightMatch(value))
+        // Collapsing and remapping leave ASCII in place, so the prefilter's literals are found either way; its minimum
+        // length counts the chars the regex sees.
+        var input = matchesRunes ? tx.CollapseUtf8(value) : value;
+        if (Prefilter is not null && !Prefilter.MightMatch(input))
         {
             if (VerifyPrefilter is { } verify)
             {
@@ -506,7 +652,11 @@ internal sealed class RxOperator(Lazy<Regex> regex, bool remapHighBytes = false,
             return false;
         }
 
-        var input = remapHighBytes ? RegexCache.RemapHighBytes(value) : value;
+        if (remapHighBytes)
+        {
+            input = RegexCache.RemapHighBytes(input);
+        }
+
         if (!tx.Capturing)
         {
             return Regex.IsMatch(input);
@@ -518,18 +668,27 @@ internal sealed class RxOperator(Lazy<Regex> regex, bool remapHighBytes = false,
             return false;
         }
 
+        // Captures are the original bytes: map collapsed positions back.
+        var offsets = matchesRunes && !ReferenceEquals(input, value) ? RegexCache.CollapseUtf8Offsets(value) : null;
         for (var i = 0; i < match.Groups.Count && i < 9; i++)
         {
             var g = match.Groups[i];
-            var captured = g.Success ? g.Value : string.Empty;
-            tx.CaptureField(i, remapHighBytes ? RegexCache.UnmapHighBytes(captured) : captured);
+            var captured = !g.Success ? string.Empty
+                : offsets is not null ? value[offsets[g.Index]..offsets[g.Index + g.Length]]
+                : remapHighBytes ? RegexCache.UnmapHighBytes(g.Value)
+                : g.Value;
+            tx.CaptureField(i, captured);
         }
 
         return true;
     }
 
     /// <summary>Whether the regex matches the value, without the prefilter or captures.</summary>
-    internal bool RegexMatches(string value) => Regex.IsMatch(remapHighBytes ? RegexCache.RemapHighBytes(value) : value);
+    internal bool RegexMatches(string value)
+    {
+        var input = matchesRunes ? RegexCache.CollapseUtf8(value) : value;
+        return Regex.IsMatch(remapHighBytes ? RegexCache.RemapHighBytes(input) : input);
+    }
 }
 
 internal sealed class PmOperator : IOperator

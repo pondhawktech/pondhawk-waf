@@ -106,8 +106,12 @@ public static class WafServiceCollectionExtensions
         return sb.ToString();
     }
 
-    internal static WafEngine CreateEngine(WafOptions options, ILoggerFactory loggerFactory, WafMetrics? metrics = null)
+    // Relative paths in Directives, DirectivesAfterRules (Include, @pmFromFile) and RuleFiles resolve against
+    // contentRoot, the application's content root. The working directory is / under systemd and System32 for a
+    // Windows service.
+    internal static WafEngine CreateEngine(WafOptions options, ILoggerFactory loggerFactory, WafMetrics? metrics = null, string? contentRoot = null)
     {
+        var root = contentRoot ?? Directory.GetCurrentDirectory();
         var fs = new CompositeConfigFileSystem(CoreRuleSetFiles.FileSystem);
         var builder = new WafBuilder(fs);
         var errorLog = loggerFactory.CreateLogger("Pondhawk.Waf.Rules");
@@ -147,7 +151,7 @@ public static class WafServiceCollectionExtensions
 
         if (!string.IsNullOrWhiteSpace(options.Directives))
         {
-            builder.AddDirectives(options.Directives, Directory.GetCurrentDirectory());
+            builder.AddDirectives(options.Directives, root);
         }
 
         var pathExclusions = WafExclusion.PathDirectives(options.Exclusions);
@@ -172,12 +176,12 @@ public static class WafServiceCollectionExtensions
 
         if (!string.IsNullOrWhiteSpace(options.DirectivesAfterRules))
         {
-            builder.AddDirectives(options.DirectivesAfterRules, Directory.GetCurrentDirectory());
+            builder.AddDirectives(options.DirectivesAfterRules, root);
         }
 
         foreach (var file in options.RuleFiles)
         {
-            builder.AddFile(Path.GetFullPath(file));
+            builder.AddFile(Path.GetFullPath(file, root));
         }
 
         // After every rule: SecRuleUpdateTargetById needs the rule to exist.

@@ -129,7 +129,10 @@ public sealed class WafOptions
     /// <summary>SecLang loaded after the CRS rules: SecRuleRemoveById, SecRuleUpdateTargetById.</summary>
     public string? DirectivesAfterRules { get; set; }
 
-    /// <summary>SecLang files loaded after <see cref="DirectivesAfterRules"/>, from the local file system.</summary>
+    /// <summary>
+    /// SecLang files loaded after <see cref="DirectivesAfterRules"/>, from the local file system. Relative paths here,
+    /// and in Include and @pmFromFile in the directives, resolve against the application's content root.
+    /// </summary>
     public List<string> RuleFiles { get; } = [];
 
     /// <summary>Requests for which this returns true skip the WAF (e.g. health checks). Keep it narrow.</summary>

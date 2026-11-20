@@ -28,7 +28,11 @@ public static class BodyProcessor
                 Multipart.Process(body.Span, tx, options);
                 return true;
             case "JSON":
-                ProcessJson(body, tx, options, tx.Variables.ArgsPost);
+                if (ProcessJson(body, options, tx.Variables.ArgsPost))
+                {
+                    tx.Variables.ArgumentsLimitReached.Set("1");
+                }
+
                 return true;
             case "XML":
                 ProcessXml(body, tx, tx.Variables.RequestXml);
@@ -47,7 +51,9 @@ public static class BodyProcessor
         switch (name.ToUpperInvariant())
         {
             case "JSON":
-                ProcessJson(body, tx, new BodyProcessorOptions(string.Empty, jsonDepthLimit, argumentsLimit), tx.Variables.ResponseArgs);
+                // A truncated response document leaves ARGUMENTS_LIMIT_REACHED alone: that variable describes the
+                // request. RESPONSE_BODY still holds the whole body for the leakage rules.
+                ProcessJson(body, new BodyProcessorOptions(string.Empty, jsonDepthLimit, argumentsLimit), tx.Variables.ResponseArgs);
                 return true;
             case "XML":
                 ProcessXml(body, tx, tx.Variables.ResponseXml);
@@ -76,7 +82,8 @@ public static class BodyProcessor
         SetRequestBody(text, tx);
     }
 
-    private static void ProcessJson(ReadOnlyMemory<byte> body, Transaction tx, BodyProcessorOptions options, Collections.MapCollection target)
+    // Returns true when the arguments limit truncated the document.
+    private static bool ProcessJson(ReadOnlyMemory<byte> body, BodyProcessorOptions options, Collections.MapCollection target)
     {
         JsonDocument doc;
         try
@@ -107,10 +114,7 @@ public static class BodyProcessor
                 throw new BodyProcessorException("invalid JSON string: " + ex.Message);
             }
 
-            if (state.Truncated)
-            {
-                tx.Variables.ArgumentsLimitReached.Set("1");
-            }
+            return state.Truncated;
         }
     }
 

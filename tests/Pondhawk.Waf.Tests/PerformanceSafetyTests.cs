@@ -65,7 +65,7 @@ public class PerformanceSafetyTests
         var prefilter = RegexPrefilter.Create(pattern);
         var regex = new RegexCache().Get(pattern);
         var pieces = Regex.Matches(pattern, "[A-Za-z]+|[^A-Za-z]").Select(m => m.Value).Append(" ").Append("(").Append("=").ToArray();
-        var random = new Random(pattern.GetHashCode(StringComparison.Ordinal));
+        var random = new Random(StableSeed(pattern));
         var matched = 0;
         for (var i = 0; i < 20_000; i++)
         {
@@ -105,7 +105,7 @@ public class PerformanceSafetyTests
         };
         Assert.True(Transforms.TryGet(name, out var fast));
         string[] alphabet = ["a", "B", "z", "0", " ", "  ", "\t", "\n", "\r", "\v", "\f", "/", ".", "..", "*", "/*", "*/", "-", "--", "<!--", "-->", "#", "(", "\"", "'", "\\", "^", ",", ";", " ", "Â ", "Â\u0085", "é", "ÿ"];
-        var random = new Random(name.GetHashCode(StringComparison.Ordinal));
+        var random = new Random(StableSeed(name));
         for (var i = 0; i < 50_000; i++)
         {
             var sb = new StringBuilder();
@@ -131,5 +131,17 @@ public class PerformanceSafetyTests
     {
         Assert.True(Transforms.TryGet(name, out var transformation));
         Assert.Same(input, transformation(input));
+    }
+
+    // string.GetHashCode is randomized per process; a fixed seed makes every run test the same inputs.
+    private static int StableSeed(string text)
+    {
+        var seed = 17;
+        foreach (var c in text)
+        {
+            seed = unchecked((seed * 31) + c);
+        }
+
+        return seed;
     }
 }

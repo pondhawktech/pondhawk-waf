@@ -2,6 +2,7 @@ using System.Diagnostics;
 // Transaction processing follows OWASP Coraza (Apache-2.0) internal/corazawaf/transaction.go.
 using System.Globalization;
 using System.Text.RegularExpressions;
+using Pondhawk.Waf.Operators;
 using Pondhawk.Waf.BodyProcessors;
 using Pondhawk.Waf.Collections;
 using Pondhawk.Waf.Rules;
@@ -794,6 +795,30 @@ public sealed class Transaction : IDisposable
 
     // Working memory for rule evaluation, rented from the engine's pool on first use and returned on dispose.
     private EvaluationScratch Scratch => _scratch ??= Waf.ScratchPool.Rent();
+
+    // Reserved chain id: never produced by the parser's transformation ids.
+    private const int CollapsedUtf8Id = int.MinValue;
+
+    /// <summary>
+    /// <see cref="RegexCache.CollapseUtf8"/>, cached per phase: every rune @rx rule reads the same collapsed value.
+    /// </summary>
+    internal string CollapseUtf8(string value)
+    {
+        if (value.AsSpan().IndexOfAnyExceptInRange('\0', '\u007f') < 0)
+        {
+            return value;
+        }
+
+        var cache = Scratch.Cache;
+        if (cache.TryGetValue(CollapsedUtf8Id, value, out var collapsed))
+        {
+            return collapsed;
+        }
+
+        collapsed = RegexCache.CollapseUtf8(value);
+        cache.Add(CollapsedUtf8Id, value, collapsed);
+        return collapsed;
+    }
 
     internal List<MatchData> RentMatchList() => Scratch.RentMatchList();
 

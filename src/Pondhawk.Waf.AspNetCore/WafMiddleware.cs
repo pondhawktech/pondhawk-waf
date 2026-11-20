@@ -48,16 +48,28 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvide
             // Upgraded connections (WebSocket) bypass the body feature, so the wrapper only sees normal responses.
             // Do not skip on request headers: a client could send "Connection: Upgrade" to avoid inspection.
             var inner = context.Features.GetRequiredFeature<IHttpResponseBodyFeature>();
-            using var inspector = new ResponseInspector(context, tx, inner, snapshot.Options.HoldResponsesInDetectionOnly);
+            var innerResponse = context.Features.GetRequiredFeature<IHttpResponseFeature>();
+            var response = new InspectedResponseFeature(innerResponse);
+            using var inspector = new ResponseInspector(context, tx, inner, response, snapshot.Options.HoldResponsesInDetectionOnly);
             context.Features.Set<IHttpResponseBodyFeature>(inspector);
+            context.Features.Set<IHttpResponseFeature>(response);
             try
             {
                 await next(context);
                 await inspector.FinishAsync();
             }
+            catch when (inspector.ResponseStarted && !innerResponse.HasStarted)
+            {
+                // The application started a response (phase 3 ran, nothing sent yet) and then failed. On a server
+                // without the WAF the response would have started, so nothing outside could replace it. Abort, so an
+                // exception handler outside the WAF cannot send an uninspected error page in its place.
+                context.Abort();
+                throw;
+            }
             finally
             {
                 context.Features.Set(inner);
+                context.Features.Set(innerResponse);
             }
 
             if (inspector.Interruption is { } responseInterruption)
