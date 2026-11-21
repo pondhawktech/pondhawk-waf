@@ -9,3 +9,6 @@ artifacts/
 
 # Built by tests/Pondhawk.Waf.LibInjection.Fuzz/run.sh
 tests/Pondhawk.Waf.LibInjection.Fuzz/oracle/libinjection-oracle
+
+# Written by tests/Pondhawk.Waf.Pentest/run.sh
+pentest-reports/
