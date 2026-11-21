@@ -27,6 +27,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     private readonly bool _holdInDetectionOnly;
     private PipeWriter? _writer;
     private State _state = State.NotStarted;
+    private bool _bufferingDisabled;
 
     // Held bytes (in the transaction's buffer) not yet sent.
     private bool _heldPending;
@@ -70,22 +71,29 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
     public PipeWriter Writer => _writer ??= PipeWriter.Create(this, new StreamPipeWriterOptions(leaveOpen: true));
 
     /// <summary>
-    /// A streaming response (server-sent events, streamed JSON) asks for its writes to go out at once. Holding it until
-    /// the application finishes would stall the client, so phase 4 runs on what is held now and the rest streams
-    /// through uninspected, as with a response over the limit.
+    /// A streaming response (server-sent events, streamed JSON, a reverse proxy) asks for its writes to go out at once.
+    /// Holding it until the application finishes would stall the client, so phase 4 runs on what is held and the rest
+    /// streams through uninspected, as with a response over the limit. As on the server, this does not start the
+    /// response: the application may still set the status and headers, and phase 3 runs when the response starts (#31).
     /// </summary>
     public void DisableBuffering()
     {
-        BeginResponse();
+        _bufferingDisabled = true;
+        StopHolding();
+        if (_state != State.Blocked)
+        {
+            using var outer = _response.EnterOuter();
+            _inner.DisableBuffering();
+        }
+    }
+
+    // Buffering disabled: phase 4 runs on the bytes held so far, and the rest passes through.
+    private void StopHolding()
+    {
         if (_state == State.Holding)
         {
             Interruption = _tx.ProcessResponseBody();
             _state = Interruption is null ? State.PassThrough : State.Blocked;
-        }
-
-        if (_state is State.PassThrough or State.Streaming)
-        {
-            _inner.DisableBuffering();
         }
     }
 
@@ -94,6 +102,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         await BeginResponseAsync();
         if (_state is State.PassThrough or State.Streaming)
         {
+            using var outer = _response.EnterOuter();
             await _inner.StartAsync(cancellationToken);
         }
     }
@@ -111,6 +120,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         await FinishAsync();
         if (_state == State.PassThrough)
         {
+            using var outer = _response.EnterOuter();
             await _inner.CompleteAsync();
         }
     }
@@ -140,13 +150,13 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         {
             case State.PassThrough:
                 FlushHeld();
-                _inner.Stream.Write(buffer);
+                InnerWrite(buffer);
                 break;
             case State.Streaming:
                 Copy(buffer);
                 if (_state != State.Blocked)
                 {
-                    _inner.Stream.Write(buffer);
+                    InnerWrite(buffer);
                 }
 
                 break;
@@ -155,7 +165,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
                 if (_state == State.PassThrough)
                 {
                     FlushHeld();
-                    _inner.Stream.Write(buffer[written..]);
+                    InnerWrite(buffer[written..]);
                 }
 
                 break;
@@ -172,13 +182,13 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         {
             case State.PassThrough:
                 await FlushHeldAsync(cancellationToken);
-                await _inner.Stream.WriteAsync(buffer, cancellationToken);
+                await InnerWriteAsync(buffer, cancellationToken);
                 break;
             case State.Streaming:
                 Copy(buffer.Span);
                 if (_state != State.Blocked)
                 {
-                    await _inner.Stream.WriteAsync(buffer, cancellationToken);
+                    await InnerWriteAsync(buffer, cancellationToken);
                 }
 
                 break;
@@ -187,7 +197,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
                 if (_state == State.PassThrough)
                 {
                     await FlushHeldAsync(cancellationToken);
-                    await _inner.Stream.WriteAsync(buffer[written..], cancellationToken);
+                    await InnerWriteAsync(buffer[written..], cancellationToken);
                 }
 
                 break;
@@ -199,6 +209,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         if (_state is State.PassThrough or State.Streaming)
         {
             FlushHeld();
+            using var outer = _response.EnterOuter();
             _inner.Stream.Flush();
         }
     }
@@ -208,6 +219,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         if (_state is State.PassThrough or State.Streaming)
         {
             await FlushHeldAsync(cancellationToken);
+            using var outer = _response.EnterOuter();
             await _inner.Stream.FlushAsync(cancellationToken);
         }
     }
@@ -312,6 +324,11 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
 
             // DetectionOnly cannot replace the response, so there is nothing to hold it for.
             _state = _tx.RuleEngine == RuleEngineMode.DetectionOnly && !_holdInDetectionOnly ? State.Streaming : State.Holding;
+            if (_bufferingDisabled)
+            {
+                StopHolding();
+            }
+
             return;
         }
 
@@ -375,7 +392,7 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         if (_heldPending)
         {
             _heldPending = false;
-            _inner.Stream.Write(_tx.BufferedResponseBody.Span);
+            InnerWrite(_tx.BufferedResponseBody.Span);
         }
     }
 
@@ -384,7 +401,21 @@ internal sealed class ResponseInspector : Stream, IHttpResponseBodyFeature
         if (_heldPending)
         {
             _heldPending = false;
-            await _inner.Stream.WriteAsync(_tx.BufferedResponseBody, cancellationToken);
+            await InnerWriteAsync(_tx.BufferedResponseBody, cancellationToken);
         }
+    }
+
+    // Writes to the server's body feature. Code outside the WAF (response compression) runs and sees the server's
+    // headers, not the application's read-only view.
+    private void InnerWrite(ReadOnlySpan<byte> buffer)
+    {
+        using var outer = _response.EnterOuter();
+        _inner.Stream.Write(buffer);
+    }
+
+    private async ValueTask InnerWriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
+    {
+        using var outer = _response.EnterOuter();
+        await _inner.Stream.WriteAsync(buffer, cancellationToken);
     }
 }

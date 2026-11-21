@@ -50,7 +50,6 @@ public sealed partial class WafMiddleware(RequestDelegate next, WafEngineProvide
             var inner = context.Features.GetRequiredFeature<IHttpResponseBodyFeature>();
             var innerResponse = context.Features.GetRequiredFeature<IHttpResponseFeature>();
             var response = new InspectedResponseFeature(innerResponse);
-            response.RegisterServerStarting();
             using var inspector = new ResponseInspector(context, tx, inner, response, snapshot.Options.HoldResponsesInDetectionOnly);
             context.Features.Set<IHttpResponseBodyFeature>(inspector);
             context.Features.Set<IHttpResponseFeature>(response);

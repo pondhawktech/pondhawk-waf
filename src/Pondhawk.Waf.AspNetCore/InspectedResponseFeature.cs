@@ -14,15 +14,20 @@ namespace Pondhawk.Waf.AspNetCore;
 /// response. An exception handler outside the WAF therefore cannot write an error page over a response the
 /// application already started (#20).</item>
 /// </list>
-/// Callbacks registered before the WAF ran stay with the server's feature and run when the server starts the response.
-/// <see cref="ServerStarting"/> runs first among them and makes this feature pass everything to the server's, so those
-/// callbacks change the real status and headers, as without the WAF. Phase 3 does not see those changes (#30).
+/// Code outside the WAF runs while the WAF sends the response on: a body feature that wraps the server's (response
+/// compression sets Content-Encoding on its first write) and OnStarting callbacks registered before the WAF ran (security
+/// headers), which the server runs when the WAF's write starts the response. They read this feature through
+/// HttpContext, but they are not the application: during <see cref="EnterOuter"/> this feature passes everything to the
+/// server's, as without the WAF. Phase 3 does not see their changes (#30, #31).
 /// </summary>
 internal sealed class InspectedResponseFeature(IHttpResponseFeature inner) : IHttpResponseFeature
 {
     private List<(Func<object, Task> Callback, object State)>? _onStarting;
     private HeaderDictionary? _frozenHeaders;
-    private bool _serverStarting;
+    private int _outerCalls;
+
+    /// <summary>True while the WAF calls the server's body feature: code outside the WAF runs.</summary>
+    private bool Outer => _outerCalls > 0;
 
     /// <summary>True once phase 3 has read the status and headers.</summary>
     public bool Started { get; private set; }
@@ -51,7 +56,7 @@ internal sealed class InspectedResponseFeature(IHttpResponseFeature inner) : IHt
     {
         get
         {
-            if (!Started || _serverStarting)
+            if (!Started || Outer)
             {
                 return inner.Headers;
             }
@@ -70,11 +75,11 @@ internal sealed class InspectedResponseFeature(IHttpResponseFeature inner) : IHt
         set => inner.Body = value;
     }
 
-    public bool HasStarted => (Started && !_serverStarting) || inner.HasStarted;
+    public bool HasStarted => (Started && !Outer) || inner.HasStarted;
 
     public void OnStarting(Func<object, Task> callback, object state)
     {
-        if (_serverStarting)
+        if (Outer)
         {
             inner.OnStarting(callback, state);
             return;
@@ -102,24 +107,12 @@ internal sealed class InspectedResponseFeature(IHttpResponseFeature inner) : IHt
         }
     }
 
-    /// <summary>
-    /// Registers <see cref="ServerStarting"/> on the server's feature. Call it when this feature is installed: the server
-    /// runs OnStarting callbacks last registered first, so it runs before every callback registered outside the WAF.
-    /// </summary>
-    public void RegisterServerStarting()
+    /// <summary>The WAF is about to call the server's body feature. Dispose the result when the call returns.</summary>
+    public OuterCall EnterOuter()
     {
-        if (!inner.HasStarted)
-        {
-            inner.OnStarting(static state =>
-            {
-                ((InspectedResponseFeature)state).ServerStarting();
-                return Task.CompletedTask;
-            }, this);
-        }
+        _outerCalls++;
+        return new OuterCall(this);
     }
-
-    /// <summary>The server is starting the response: the callbacks that follow belong to the server, not the application.</summary>
-    public void ServerStarting() => _serverStarting = true;
 
     /// <summary>Phase 3 is about to read the status and headers: from now on they cannot change.</summary>
     public void MarkStarted() => Started = true;
@@ -130,5 +123,10 @@ internal sealed class InspectedResponseFeature(IHttpResponseFeature inner) : IHt
         {
             throw new InvalidOperationException("The response has already started; the WAF has inspected its status and headers.");
         }
+    }
+
+    internal readonly struct OuterCall(InspectedResponseFeature feature) : IDisposable
+    {
+        public void Dispose() => feature._outerCalls--;
     }
 }

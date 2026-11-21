@@ -12,6 +12,7 @@
     <Project Path="src/Pondhawk.Waf/Pondhawk.Waf.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Pondhawk.Waf.Compatibility/Pondhawk.Waf.Compatibility.csproj" />
     <Project Path="tests/Pondhawk.Waf.CrsRegression/Pondhawk.Waf.CrsRegression.csproj" />
     <Project Path="tests/Pondhawk.Waf.LibInjection.Fuzz/Pondhawk.Waf.LibInjection.Fuzz.csproj" />
     <Project Path="tests/Pondhawk.Waf.LibInjection.Tests/Pondhawk.Waf.LibInjection.Tests.csproj" />

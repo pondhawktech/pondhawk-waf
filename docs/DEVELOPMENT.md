@@ -24,9 +24,24 @@ Requires the .NET 10 SDK.
 
 ```sh
 dotnet build
-dotnet test                                                       # unit, middleware and libinjection tests
+dotnet test                                                       # unit, middleware, compatibility and libinjection tests
 dotnet run --project tests/Pondhawk.Waf.CrsRegression -c Release  # CRS regression suite (about 40 s)
 ```
+
+### Compatibility suite
+
+`tests/Pondhawk.Waf.Compatibility` runs a realistic application on Kestrel, with the middleware Pond Hawk apps put
+around the WAF. Outside: forwarded headers, response compression, security headers (NetEscapades), exception handler,
+status code pages. Inside: WebSockets, static files, routing, CORS, rate limiting, authentication, antiforgery, output
+cache, minimal APIs and a YARP route to a second Kestrel app.
+
+The differential test sends each clean request to the app without the WAF and to the app with the WAF in `Off`,
+`DetectionOnly`, `DetectionOnly` with held responses, and `On`. Status, headers and body must be the same. A
+difference is a WAF bug until shown otherwise (#30, #31). To add a case, add an endpoint to `CompatibilityApp` and an
+entry to `DifferentialTests.Cases`. To see the servers' warnings and errors, set `COMPAT_LOG=1`
+(`COMPAT_LOG_LEVEL=Debug` for more).
+
+### CRS regression suite
 
 The regression runner sends each CRS test as raw bytes to Kestrel with the configuration Coraza uses for the same
 suite (paranoia level 4, DetectionOnly), and compares the logged rule ids. Results for CRS v4.30.0:
