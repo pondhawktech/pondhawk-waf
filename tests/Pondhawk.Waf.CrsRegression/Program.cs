@@ -45,6 +45,7 @@ const string TestingConfig = """
     """;
 
 var collected = new ConcurrentBag<int>();
+var regexTimeouts = new ConcurrentBag<RegexTimeout>();
 
 // Every value the regex prefilter rejects is checked against the regex: a prefilter that hides a match is a bypass.
 var prefilterRejected = 0L;
@@ -78,6 +79,7 @@ WebApplication CreateApp(IEnumerable<Pondhawk.Waf.CoreRuleSet.CrsPlugin> plugins
         o.Configure = b =>
         {
             b.Config.ErrorCallback = m => collected.Add(m.Rule.LogId);
+            b.Config.RegexTimeoutCallback = regexTimeouts.Add;
             b.Config.AuditLogWriter = null;
         };
     });
@@ -246,6 +248,12 @@ foreach (var (pattern, value) in prefilterViolations.Take(20))
     Console.WriteLine($"PREFILTER MISSED A MATCH: /{pattern}/ on '{value}'");
 }
 
+Console.WriteLine($"Regex engine {regexEngine}: {regexTimeouts.Count} timeouts");
+foreach (var t in regexTimeouts.Take(20))
+{
+    Console.WriteLine($"REGEX TIMEOUT: rule {t.RuleId} on {t.Variable} ({t.ValueLength} chars)");
+}
+
 foreach (var failure in failures.Take(50))
 {
     Console.WriteLine("FAIL " + failure);
@@ -258,7 +266,7 @@ if (reportPath is not null)
 
 await app.StopAsync();
 await pluginApp.StopAsync();
-return fail == 0 && prefilterViolations.IsEmpty ? 0 : 1;
+return fail == 0 && prefilterViolations.IsEmpty && regexTimeouts.IsEmpty ? 0 : 1;
 
 static Uri ServerAddress(WebApplication app) =>
     new(app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First());

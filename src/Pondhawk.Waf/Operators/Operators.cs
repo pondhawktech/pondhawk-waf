@@ -206,8 +206,29 @@ public sealed class RegexCache
             pending = [.. _cache.Values.Where(l => !l.IsValueCreated)];
         }
 
-        Parallel.ForEach(pending, lazy => _ = lazy.Value);
+        Parallel.ForEach(pending, lazy => WarmUp(lazy.Value));
     }
+
+    // Runs a compiled (backtracking) regex once, so the JIT compiles its code here and not in a request's match. The
+    // probe does not reach every method of every regex; RxOperator.Evaluate handles the rest.
+    private static void WarmUp(Regex regex)
+    {
+        if (regex.MatchTimeout == Regex.InfiniteMatchTimeout || (regex.Options & RegexOptions.NonBacktracking) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            _ = regex.IsMatch(WarmUpProbe);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // The JIT took the time; it has run.
+        }
+    }
+
+    private const string WarmUpProbe = "GET /index.php?id=1&q=select+1+from+t Host: localhost <script>alert(1)</script> ../../etc/passwd; cat /x | $(id) {\"a\":[1]}";
 
     /// <summary>Compiles a pattern without the SecLang default flags (used for collection key selectors).</summary>
     public Regex GetPlain(string pattern)
@@ -660,6 +681,30 @@ internal sealed class RxOperator(Lazy<Regex> regex, bool remapHighBytes = false,
             input = RegexCache.RemapHighBytes(input);
         }
 
+        // A compiled (backtracking) regex is JIT-compiled method by method, on the first call of each: the first matches
+        // can exceed the timeout although the input is harmless (#34). A timeout is thrown at a check after the methods
+        // on its path are compiled, so after the first timeout the code is ready. A match that started before it gets
+        // one retry; a match that started after it is timed on compiled code.
+        var jitDone = _timedOut;
+        try
+        {
+            return Match(tx, value, input);
+        }
+        catch (RegexMatchTimeoutException) when (!jitDone)
+        {
+            _timedOut = true;
+            return Match(tx, value, input);
+        }
+    }
+
+    private volatile bool _timedOut;
+
+    /// <summary>Tests only: runs before each match of this operator.</summary>
+    internal Action? BeforeMatch { get; set; }
+
+    private bool Match(Transaction tx, string value, string input)
+    {
+        BeforeMatch?.Invoke();
         if (!tx.Capturing)
         {
             return Regex.IsMatch(input);

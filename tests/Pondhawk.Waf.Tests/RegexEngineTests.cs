@@ -70,6 +70,113 @@ public sealed class RegexEngineTests
         }
     }
 
+    [Fact]
+    public void AFirstMatchThatTimesOutIsRetried()
+    {
+        // The first match of a compiled regex runs the JIT and can exceed the timeout (#34): not a match.
+        var (waf, rx) = TimeoutRule();
+        var calls = 0;
+        rx.BeforeMatch = () =>
+        {
+            if (++calls == 1)
+            {
+                throw new RegexMatchTimeoutException("x", "y", TimeSpan.FromMilliseconds(250));
+            }
+        };
+        using var tx = Request(waf, "/?q=grant_type");
+        Assert.Null(tx.ProcessRequestHeaders());
+        Assert.Equal(2, calls);
+        Assert.DoesNotContain(tx.MatchedRules, m => m.Rule.Id == 2);
+        Assert.Equal(0, waf.RegexTimeouts);
+    }
+
+    [Fact]
+    public void ATimeoutAfterAnEarlierTimeoutIsNotRetried()
+    {
+        // After the first timeout the regex code is compiled: a later timeout is the input's doing.
+        var (waf, rx) = TimeoutRule();
+        var calls = 0;
+        rx.BeforeMatch = () =>
+        {
+            calls++;
+            throw new RegexMatchTimeoutException("x", "y", TimeSpan.FromMilliseconds(250));
+        };
+        using (var first = Request(waf, "/?q=one"))
+        {
+            Assert.NotNull(first.ProcessRequestHeaders());
+            Assert.Equal(2, calls);
+        }
+
+        using var tx = Request(waf, "/?q=two");
+        Assert.NotNull(tx.ProcessRequestHeaders());
+        Assert.Equal(3, calls);
+        Assert.Equal(2, waf.RegexTimeouts);
+    }
+
+    [Fact]
+    public void ConcurrentFirstMatchesThatTimeOutAreAllRetried()
+    {
+        // Two requests wait for the same JIT and time out together: neither is a match.
+        var (waf, rx) = TimeoutRule();
+        using var bothStarted = new Barrier(2);
+        var calls = 0;
+        rx.BeforeMatch = () =>
+        {
+            if (Interlocked.Increment(ref calls) <= 2)
+            {
+                Assert.True(bothStarted.SignalAndWait(TimeSpan.FromSeconds(10)));
+                throw new RegexMatchTimeoutException("x", "y", TimeSpan.FromMilliseconds(250));
+            }
+        };
+        Parallel.For(0, 2, new ParallelOptions { MaxDegreeOfParallelism = 2 }, i =>
+        {
+            using var tx = Request(waf, "/?q=value" + i);
+            Assert.Null(tx.ProcessRequestHeaders());
+        });
+        Assert.Equal(4, calls);
+        Assert.Equal(0, waf.RegexTimeouts);
+    }
+
+    [Fact]
+    public void ATimeoutIsReportedAndLogsTheInspectedValue()
+    {
+        var reported = new List<RegexTimeout>();
+        var (waf, rx) = TimeoutRule(reported.Add);
+        rx.BeforeMatch = () => throw new RegexMatchTimeoutException("x", "y", TimeSpan.FromMilliseconds(250));
+
+        // Rule 1 captures "host" first: rule 2 must not log it as its data.
+        using var tx = Request(waf, "/?h=host&q=grant_type");
+        Assert.Equal(2, tx.ProcessRequestHeaders()?.RuleId);
+        var matched = Assert.Single(tx.MatchedRules, m => m.Rule.Id == 2);
+        Assert.Equal("Matched Data: grant_type", matched.Data);
+        Assert.Equal(1, waf.RegexTimeouts);
+        var timeout = Assert.Single(reported);
+        Assert.Equal(new RegexTimeout(2, "ARGS:q", "grant_type".Length, TimeSpan.FromMilliseconds(250)), timeout);
+    }
+
+    [Fact]
+    public void RegexTimeoutReachesTheBacktrackingRegexes()
+    {
+        var (waf, rx) = TimeoutRule(timeout: TimeSpan.FromSeconds(1));
+        Assert.Equal(TimeSpan.FromSeconds(1), rx.Regex.MatchTimeout);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new WafBuilder { RegexTimeout = TimeSpan.Zero });
+        Assert.Throws<ArgumentOutOfRangeException>(() => new WafBuilder { RegexTimeout = TimeSpan.FromSeconds(11) });
+        GC.KeepAlive(waf);
+    }
+
+    private static (WafEngine Waf, RxOperator Rx) TimeoutRule(Action<RegexTimeout>? report = null, TimeSpan? timeout = null)
+    {
+        var builder = new WafBuilder { RegexEngine = RegexEngine.Backtracking, RegexTimeout = timeout ?? TimeSpan.FromMilliseconds(250) };
+        builder.Config.RegexTimeoutCallback = report;
+        builder.AddDirectives("""
+            SecRuleEngine On
+            SecRule ARGS:h "@rx ^(h)ost$" "id:1,phase:1,pass,capture,nolog"
+            SecRule ARGS:q "@rx ^[0-9]+$" "id:2,phase:1,deny,status:403,capture,log,logdata:'Matched Data: %{TX.0}'"
+            """);
+        var waf = builder.Build();
+        return (waf, (RxOperator)waf.Rules.Single(r => r.Id == 2).Operator!);
+    }
+
     internal static void AssertBlocksSqlInjection(WafEngine waf)
     {
         using var tx = Request(waf, "/search?q=1%27%20OR%20%271%27=%271");

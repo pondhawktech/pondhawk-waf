@@ -306,12 +306,20 @@ public sealed class Rule
                             result = !result;
                         }
                     }
-                    catch (RegexMatchTimeoutException)
+                    catch (RegexMatchTimeoutException ex)
                     {
-                        // A backtracking match ran out of time: the input is built to be slow. Count it as a match,
-                        // negated or not, so a slow input cannot pass a rule, and DetectionOnly logs it instead of failing
-                        // the request.
+                        // A backtracking match ran out of time (after the JIT, see RxOperator): the input is built to
+                        // be slow. Count it as a match, negated or not, so a slow input cannot pass a rule, and
+                        // DetectionOnly logs it instead of failing the request. The captures of an earlier rule must
+                        // not appear as this rule's data: TX:0 is the inspected value.
                         result = true;
+                        tx.CaptureField(0, carg);
+                        for (var i = 1; i < 10; i++)
+                        {
+                            tx.CaptureField(i, string.Empty);
+                        }
+
+                        tx.Waf.RecordRegexTimeout(new RegexTimeout(LogId, new MatchData(arg.Variable, arg.Key, carg).FullName, carg.Length, ex.MatchTimeout));
                     }
 
                     if (!result)

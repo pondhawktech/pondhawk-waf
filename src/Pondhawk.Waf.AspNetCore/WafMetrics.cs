@@ -21,6 +21,8 @@ namespace Pondhawk.Waf.AspNetCore;
 /// request_body, response_headers, response_body, logging. WAF processing only, not network waits.</description></item>
 /// <item><term>pondhawk.waf.log_failures</term><description>Rule log or audit log writes that threw.</description></item>
 /// <item><term>pondhawk.waf.reloads</term><description>Configuration reloads, by <c>waf.result</c>: success, failure.</description></item>
+/// <item><term>pondhawk.waf.regex_timeouts</term><description>Regex matches that ran out of time and counted as matches,
+/// by <c>waf.rule.id</c>. Should stay at 0; see <see cref="WafOptions.RegexTimeout"/>.</description></item>
 /// </list>
 /// </remarks>
 public sealed class WafMetrics
@@ -37,6 +39,7 @@ public sealed class WafMetrics
     private readonly Histogram<double> _phaseDuration;
     private readonly Counter<long> _logFailures;
     private readonly Counter<long> _reloads;
+    private readonly Counter<long> _regexTimeouts;
 
     public WafMetrics(IMeterFactory meterFactory)
     {
@@ -53,11 +56,14 @@ public sealed class WafMetrics
             });
         _logFailures = meter.CreateCounter<long>("pondhawk.waf.log_failures", "{failure}", "Rule log or audit log writes that threw.");
         _reloads = meter.CreateCounter<long>("pondhawk.waf.reloads", "{reload}", "Configuration reloads.");
+        _regexTimeouts = meter.CreateCounter<long>("pondhawk.waf.regex_timeouts", "{timeout}", "Regex matches that ran out of time and counted as matches.");
     }
 
     internal void Bypassed() => _requests.Add(1, new KeyValuePair<string, object?>("waf.result", "bypassed"));
 
     internal void LogFailure() => _logFailures.Add(1);
+
+    internal void RegexTimeout(int ruleId) => _regexTimeouts.Add(1, new KeyValuePair<string, object?>("waf.rule.id", ruleId));
 
     internal void Reload(bool success) => _reloads.Add(1, new KeyValuePair<string, object?>("waf.result", success ? "success" : "failure"));
 

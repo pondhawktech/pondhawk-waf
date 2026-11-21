@@ -64,6 +64,12 @@ public sealed class WafOptions
     /// </summary>
     public RegexEngine RegexEngine { get; set; }
 
+    /// <summary>
+    /// Timeout of one match on the backtracking engine (all patterns with <see cref="Waf.RegexEngine.Backtracking"/>).
+    /// More than 0, at most 10 s. A match that runs out of time counts as a match and logs a warning. Null: 250 ms.
+    /// </summary>
+    public TimeSpan? RegexTimeout { get; set; }
+
     /// <summary>Returns the effective settings: the profile with the options above applied. Validates them.</summary>
     public WafSettings Resolve()
     {

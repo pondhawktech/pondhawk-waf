@@ -441,6 +441,24 @@ public sealed class SecurityHardeningTests
         Assert.DoesNotContain(messages, m => m.Contains("inspected and logged", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task ARegexTimeoutBlocksAndLogsAWarning()
+    {
+        // #34: a timeout counts as a match and says so, with the rule and the variable.
+        var logs = new CapturingLoggerProvider();
+        using var host = await StartAsync(o =>
+        {
+            o.UseCoreRuleSet = false;
+            o.RuleEngine = RuleEngineMode.On;
+            o.RegexEngine = RegexEngine.Backtracking;
+            o.RegexTimeout = TimeSpan.FromMilliseconds(1);
+            o.Directives = """SecRule ARGS:q "@rx ^(?:a|aa)+$" "id:10,phase:1,deny,status:403,log" """;
+        }, Echo, logs);
+        using var response = await host.Client.GetAsync("/?q=" + new string('a', 40) + "!");
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Contains(logs.Messages("Pondhawk.Waf.Rules"), m => m.Contains("rule 10 ran out of time (1 ms) on ARGS:q (41 chars)", StringComparison.Ordinal));
+    }
+
     // ----- Configuration -----
 
     [Theory]

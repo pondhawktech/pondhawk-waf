@@ -24,12 +24,19 @@ public enum RegexEngine
     NonBacktracking,
 
     /// <summary>
-    /// The backtracking engine (<c>RegexOptions.Compiled</c>) with a 250 ms timeout per match. The Core Rule Set holds
-    /// about 16 MB. A crafted input can make one match take up to the timeout; a match that times out counts as a match.
-    /// For small hosts.
+    /// The backtracking engine (<c>RegexOptions.Compiled</c>) with a timeout per match (<see cref="WafBuilder.RegexTimeout"/>,
+    /// default 250 ms). The Core Rule Set holds about 16 MB. A crafted input can make one match take up to the timeout; a
+    /// match that times out counts as a match and is reported (<see cref="WafConfig.RegexTimeoutCallback"/>). For small hosts.
     /// </summary>
     Backtracking,
 }
+
+/// <summary>An @rx match that ran out of time and so counted as a match.</summary>
+/// <param name="RuleId">The rule id (the chain's id for a chained rule).</param>
+/// <param name="Variable">The variable, e.g. ARGS:q.</param>
+/// <param name="ValueLength">Length of the inspected value, after transformations.</param>
+/// <param name="Timeout">The timeout that ran out.</param>
+public sealed record RegexTimeout(int RuleId, string Variable, int ValueLength, TimeSpan Timeout);
 
 /// <summary>SecAuditEngine.</summary>
 public enum AuditEngineMode

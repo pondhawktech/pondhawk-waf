@@ -51,6 +51,7 @@ suite (paranoia level 4, DetectionOnly), and compares the logged rule ids. Resul
   before the middleware runs. Each has a reason.
 - The plugin tests (`plugin-tests/`, 459) run on a second server with every plugin loaded. 8 Nextcloud tests use
   expectations from `plugin-overrides.yaml` (differences from ModSecurity, see DESIGN.md).
+- A regex timeout fails the run (`REGEX TIMEOUT`). Run with `--regex-engine backtracking` too.
 - Every value the regex prefilter rejects is checked against the regex. A prefilter that hides a match fails the
   run (`PREFILTER MISSED A MATCH`).
 

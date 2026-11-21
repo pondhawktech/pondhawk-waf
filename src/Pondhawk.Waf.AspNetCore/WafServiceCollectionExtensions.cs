@@ -123,11 +123,18 @@ public static class WafServiceCollectionExtensions
     {
         var root = contentRoot ?? Directory.GetCurrentDirectory();
         var fs = new CompositeConfigFileSystem(CoreRuleSetFiles.FileSystem);
-        var builder = new WafBuilder(fs) { RegexEngine = options.RegexEngine };
+        var builder = options.RegexTimeout is { } regexTimeout
+            ? new WafBuilder(fs) { RegexEngine = options.RegexEngine, RegexTimeout = regexTimeout }
+            : new WafBuilder(fs) { RegexEngine = options.RegexEngine };
         var errorLog = loggerFactory.CreateLogger("Pondhawk.Waf.Rules");
         var auditLog = loggerFactory.CreateLogger("Pondhawk.Waf.Audit");
         builder.Config.ErrorCallback = matched => WafLog.RuleMatched(errorLog, matched.ErrorLogLine());
         builder.Config.AuditLogWriter = new LoggerAuditLogWriter(auditLog);
+        builder.Config.RegexTimeoutCallback = timeout =>
+        {
+            WafLog.RegexTimedOut(errorLog, timeout.RuleId, timeout.Variable, timeout.ValueLength, timeout.Timeout.TotalMilliseconds);
+            metrics?.RegexTimeout(timeout.RuleId);
+        };
         if (metrics is not null)
         {
             builder.Config.LogFailureCallback = metrics.LogFailure;
@@ -274,6 +281,9 @@ internal static partial class WafLog
 
     [LoggerMessage(EventId = 17, Level = LogLevel.Warning, Message = "Pondhawk WAF services are registered but the middleware is not: requests are NOT inspected. Call app.UsePondhawkWaf().")]
     public static partial void MiddlewareMissing(ILogger logger);
+
+    [LoggerMessage(EventId = 19, Level = LogLevel.Warning, Message = "Pondhawk WAF regex of rule {RuleId} ran out of time ({TimeoutMs} ms) on {Variable} ({ValueLength} chars) and counts as a match. If the request was legitimate, raise WafOptions.RegexTimeout or use RegexEngine.NonBacktracking.")]
+    public static partial void RegexTimedOut(ILogger logger, int ruleId, string variable, int valueLength, double timeoutMs);
 
     [LoggerMessage(EventId = 18, Level = LogLevel.Warning, Message = "Pondhawk WAF rule engine is Off: requests are NOT inspected, logged or blocked. Set WafOptions.RuleEngine = RuleEngineMode.DetectionOnly or RuleEngineMode.On to inspect.")]
     public static partial void Off(ILogger logger);

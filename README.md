@@ -383,7 +383,8 @@ options.RuleFiles.Add("/etc/myapp/rules.conf");
 | `RuleFiles` | none | SecLang files from disk, loaded last. Relative paths (also in `Include` and `@pmFromFile`) resolve against the content root |
 | `Bypass` | none | Predicate for requests that skip the WAF |
 | `UseCoreRuleSet` | `true` | Load the embedded CRS. The base configuration (body processing, limits) loads either way |
-| `RegexEngine` | `NonBacktracking` | `NonBacktracking`: linear-time matching, about 535 MB. `Backtracking`: about 65 MB, 250 ms timeout per match ([Memory](#memory)) |
+| `RegexEngine` | `NonBacktracking` | `NonBacktracking`: linear-time matching, about 535 MB. `Backtracking`: about 65 MB, a timeout per match ([Memory](#memory)) |
+| `RegexTimeout` | 250 ms | Timeout of one backtracking match (`"00:00:00.5"` in JSON). A match that runs out of time counts as a match |
 | `WarmUp` | `true` | After the regexes are built, run synthetic requests in the background, so the first real requests do not pay for building DFA states |
 | `HoldResponsesInDetectionOnly` | `false` | In DetectionOnly, hold inspected responses as `On` does, instead of streaming them and inspecting a copy |
 | `ReloadOnChange` | `true` | Rebuild the engine when bound configuration changes ([reload](#settings-from-appsettingsjson)) |
@@ -397,7 +398,7 @@ exclusions. Later settings win.
 
 | Category | Level | Content |
 |---|---|---|
-| `Pondhawk.Waf.Rules` | Warning | One ModSecurity-style line per matched rule |
+| `Pondhawk.Waf.Rules` | Warning | One ModSecurity-style line per matched rule; a regex timeout (event 19) |
 | `Pondhawk.Waf.Audit` | Information | One JSON entry per relevant request: a rule matched, the WAF blocked, or a 5xx |
 | `Pondhawk.Waf.AspNetCore.WafMiddleware` | Warning | One line per blocked request |
 | `Pondhawk.Waf` | Information, Warning, Error | Effective settings at startup and after a reload; a warning when the rule engine does not block, when warm-up fails, or when the services are registered without `UsePondhawkWaf()`; an error when a changed configuration does not build |
@@ -452,6 +453,7 @@ Or live, without code: `dotnet-counters monitor -n MyApp --counters Pondhawk.Waf
 | `pondhawk.waf.phase.duration` | histogram, s | `waf.phase`: `request_headers`, `request_body`, `response_headers`, `response_body`, `logging` | WAF latency; network waits excluded |
 | `pondhawk.waf.log_failures` | counter | none | Log or audit sink failures |
 | `pondhawk.waf.reloads` | counter | `waf.result`: `success`, `failure` | Configuration reloads |
+| `pondhawk.waf.regex_timeouts` | counter | `waf.rule.id` | Matches that ran out of time and counted as matches; should stay at 0 |
 
 To tune a higher profile, run it in DetectionOnly. Then read `would_block` and `rule.matches` by rule id: each rule
 with many matches on normal traffic needs an exclusion.
@@ -540,7 +542,7 @@ The CRS regexes take most of the memory. Choose the engine with `RegexEngine`. M
 | `RegexEngine` | Managed memory | Build time | Worst case of one match |
 |---|---|---|---|
 | `NonBacktracking` (default) | about 535 MB | about 2 s | Linear in the input: no input makes a match slow |
-| `Backtracking` | about 65 MB | about 0.3 s | 250 ms, then the match counts as a match |
+| `Backtracking` | about 65 MB | about 6 s (JIT of every regex) | `RegexTimeout`, then the match counts as a match |
 
 Add the runtime and your application: an empty ASP.NET Core app uses about 56 MB RSS. Engines in one process share
 their regexes, so a reload or a second engine adds about 45 MB, not the regexes again.
@@ -548,7 +550,14 @@ their regexes, so a reload or a second engine adds about 45 MB, not the regexes 
 Use `Backtracking` on small hosts (2 GB or less). The trade-off: a crafted input can make one match run until the
 timeout. A rule over many arguments can then cost seconds of CPU for one request; keep `ArgumentsLimit` and
 `RequestBodyNoFilesLimit` low and rate-limit clients. A match that times out counts as a match, so a slow input cannot
-pass a rule: `On` blocks the request and `DetectionOnly` logs it. Both engines pass the full CRS regression suite.
+pass a rule: `On` blocks the request and `DetectionOnly` logs it. Each timeout logs a warning (event 19, category
+`Pondhawk.Waf.Rules`) with the rule id, the variable and the value length, and counts in `pondhawk.waf.regex_timeouts`.
+On normal traffic both stay at 0; if a legitimate request times out, raise `RegexTimeout`. Both engines pass the full
+CRS regression suite without a timeout.
+
+The JIT compiles the code of a backtracking regex on its first matches, which can take longer than the timeout. The
+WAF does this in the background after the rules load, and it retries a match that ran out of time while the JIT was
+compiling, so the first requests are not blocked; they can be slower until `WafEngine.Compiled` completes.
 
 ```json
 { "Pondhawk": { "Waf": { "RegexEngine": "Backtracking" } } }

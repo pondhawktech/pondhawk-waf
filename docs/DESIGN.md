@@ -46,7 +46,15 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
 - **Regex engine choice** (`WafOptions.RegexEngine`, #33). The NonBacktracking automata of CRS hold about 535 MB;
   removing `(?i)` from every pattern about halved that in one measurement, but left more than 500 MB, so the
   patterns stay as they are. `Backtracking` compiles every pattern with `RegexOptions.Compiled` and the 250 ms timeout: about 16 MB of
-  regexes. The rest of an engine (rules, data, prefilters) is about 45 MB either way.
+  regexes. The rest of an engine (rules, data, prefilters) is about 45 MB either way. Interpreted regexes (1 MB)
+  were rejected: they time out on CRS test values of 2-64 KB (941340, 932290).
+- **JIT and the timeout** (#34). A compiled regex is JIT-compiled method by method on first call, up to 2.4 s for a
+  large CRS pattern on 2 CPUs, and that time counts toward the match timeout. `RegexCache.CompileAll` runs each
+  backtracking regex once on a probe, which does not reach every method of every regex. `RxOperator.Evaluate`
+  retries a timeout once when the operator had not timed out before the match started: the timeout is thrown at a
+  check after the methods on its path are compiled, so the retry runs compiled code. Matches started after the first
+  timeout are not retried, so an attacker gains one extra timeout per operator per process. A timeout that counts as
+  a match sets TX:0 to the inspected value and calls `WafConfig.RegexTimeoutCallback`.
 - **RE2 → .NET translation** (`RegexCache.TranslatePattern`): `\x{HH}`, `(?P<name>`, escaped punctuation as a range
   start inside a class (`[\--9]`, which .NET silently misreads; before the fix 11 CRS RCE regression tests failed),
   and a bare `[` inside a class (.NET class subtraction). `\w`, `\W`, `\d`, `\D`, `\s`, `\S` become explicit

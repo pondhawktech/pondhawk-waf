@@ -53,6 +53,12 @@ public sealed class WafConfig
     /// <summary>Called for every matched rule that has the log action (the ModSecurity error log).</summary>
     public Action<MatchedRule>? ErrorCallback { get; set; }
 
+    /// <summary>
+    /// Called for every @rx match that ran out of time (see <see cref="WafEngine.RegexTimeouts"/>). The match counts as
+    /// a match; its rule is logged as usual, with the inspected value as TX:0.
+    /// </summary>
+    public Action<RegexTimeout>? RegexTimeoutCallback { get; set; }
+
     /// <summary>Called each time <see cref="ErrorCallback"/> or the audit log writer throws (see <see cref="WafEngine.LogFailures"/>).</summary>
     public Action? LogFailureCallback { get; set; }
 
@@ -95,6 +101,26 @@ public sealed class WafEngine
     /// failures so that a broken log sink does not fail requests; monitor this count instead.
     /// </summary>
     public long LogFailures => Interlocked.Read(ref _logFailures);
+
+    private long _regexTimeouts;
+
+    /// <summary>@rx matches that ran out of time and counted as matches.</summary>
+    public long RegexTimeouts => Interlocked.Read(ref _regexTimeouts);
+
+    internal void RecordRegexTimeout(RegexTimeout timeout)
+    {
+        Interlocked.Increment(ref _regexTimeouts);
+        try
+        {
+            Config.RegexTimeoutCallback?.Invoke(timeout);
+        }
+#pragma warning disable CA1031 // A failing log sink must not decide whether requests succeed.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            RecordLogFailure();
+        }
+    }
 
     /// <summary>Counts a log sink failure. Hosts call it when the audit log writer throws in <see cref="Transaction.ProcessLogging"/>.</summary>
     public void RecordLogFailure()
@@ -188,7 +214,23 @@ public sealed class WafBuilder
     /// <summary>The regex engine for @rx patterns. Default <see cref="Waf.RegexEngine.NonBacktracking"/>.</summary>
     public RegexEngine RegexEngine { get; init; }
 
-    private RegexCache Cache => _regexCache ??= new RegexCache { PreferNonBacktracking = RegexEngine == RegexEngine.NonBacktracking };
+    /// <summary>
+    /// Timeout of one match on the backtracking engine: every pattern with <see cref="Waf.RegexEngine.Backtracking"/>,
+    /// and patterns NonBacktracking cannot run. Default 250 ms. A match that runs out of time counts as a match.
+    /// </summary>
+    public TimeSpan RegexTimeout
+    {
+        get;
+        init => field = value > TimeSpan.Zero && value <= TimeSpan.FromSeconds(10)
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(RegexTimeout), value, "RegexTimeout must be more than 0 and at most 10 seconds.");
+    } = TimeSpan.FromMilliseconds(250);
+
+    private RegexCache Cache => _regexCache ??= new RegexCache
+    {
+        PreferNonBacktracking = RegexEngine == RegexEngine.NonBacktracking,
+        BacktrackingTimeout = RegexTimeout,
+    };
 
     private SecLangParser Parser => _parser ??= new SecLangParser(Config, _fileSystem, Cache);
 
