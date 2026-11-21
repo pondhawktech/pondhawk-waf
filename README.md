@@ -71,6 +71,14 @@ bodies over the limit. The response carries no rule ids or messages; those go to
 
 ## Rolling out
 
+Checklist:
+
+- [ ] `UsePondhawkWaf()` in the right place ([Middleware order](#middleware-order)). Startup warns when it is missing.
+- [ ] Deployed in `DetectionOnly` first; false positives removed with exclusions or plugins; then `On`.
+- [ ] Body limits fit your largest legitimate request ([Profiles](#profiles)).
+- [ ] Alerts on `pondhawk.waf.blocks` and on audit log failures ([Metrics](#metrics)).
+- [ ] The application does its own part ([What your application must still do](#what-your-application-must-still-do)).
+
 Start without blocking, then tune, then block.
 
 1. Deploy with `RuleEngine = RuleEngineMode.DetectionOnly` (the default). Requests are inspected and logged, never
@@ -473,6 +481,32 @@ The base configuration also rejects:
 The engine passes all 5,193 tests of the CRS v4.30.0 regression suite, and the 459 regression tests of the bundled
 application plugins.
 
+## What your application must still do
+
+A WAF is one layer, not a fix. CRS at paranoia level 1 is tuned for few false positives, so it lets through a
+real share of attacks: payloads it has no pattern for, payloads in places a rule does not inspect, and encoded
+payloads. Measured with [GoTestWAF](https://github.com/wallarm/gotestwaf), the gaps are in these areas. Your
+application must handle them itself:
+
+- **SQL and NoSQL injection.** Use parameterized queries or an ORM. Never build a query, a MongoDB filter or a
+  `$where` expression from input.
+- **Cross-site scripting.** Encode output for its context (Razor and Blazor do it for HTML). Do not put input into
+  inline script, event handlers or `javascript:` URLs. Send a Content-Security-Policy.
+- **Command, LDAP and mail header injection.** Do not pass input to a shell. Escape LDAP filter values. Reject CR
+  and LF in values that become mail headers.
+- **Input the application decodes itself.** The WAF sees Base64, JWT parts, compressed or encrypted data only in
+  their encoded form; no rule can match an attack inside them. Validate the decoded value.
+- **Custom headers and URL path segments.** CRS inspects them for fewer attack types than query and form arguments
+  (for example, shell commands and NoSQL operators are matched in arguments, not in custom headers or the path).
+  Treat every header and path segment you read as untrusted input.
+- **Authentication, authorization and business logic.** The WAF does not know your users, your object ids or your
+  limits. Broken access control and abuse of valid requests pass it unchanged. Rate-limit expensive endpoints.
+- **WebSocket messages and file contents.** Not inspected (see [Limits](#limits-and-failure-behavior)).
+
+A higher profile closes part of these gaps and blocks more legitimate requests: `Strict` needs more exclusions
+than `Balanced`, and `Paranoid` is usable only with careful tuning. Use the detection paranoia level (the log-only
+rules) to see what a higher profile would block before you switch.
+
 ## Limits and failure behavior
 
 Not inspected:
@@ -480,7 +514,9 @@ Not inspected:
 - **The rest of a large response.** Responses are inspected on their first `ResponseBodyLimit` bytes.
 - **Streaming responses.** A response that calls `DisableBuffering()` (server-sent events, streamed JSON) is
   inspected on what it wrote before that call. The rest streams through.
-- **Compressed responses.** Put `UseResponseCompression()` before `UsePondhawkWaf()`.
+- **Compressed responses.** Put `UseResponseCompression()` before `UsePondhawkWaf()`. In a reverse proxy (YARP),
+  a backend response that is already compressed is not inspected: remove `Accept-Encoding` from proxied requests
+  and compress at the proxy, or accept that those responses are not inspected.
 - **WebSocket data** after the upgrade.
 - **File content** in multipart uploads, as in CRS. File names and sizes are inspected.
 
