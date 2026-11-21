@@ -430,6 +430,17 @@ public sealed class SecurityHardeningTests
         Assert.Contains(logs.Messages("Pondhawk.Waf"), m => m.Contains("NOT blocked", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task StartupWarnsThatOffDoesNotInspect()
+    {
+        // Off does not inspect: the DetectionOnly warning ("inspected and logged") would be wrong (#30).
+        var logs = new CapturingLoggerProvider();
+        using var host = await StartAsync(o => o.RuleEngine = RuleEngineMode.Off, Echo, logs);
+        var messages = logs.Messages("Pondhawk.Waf");
+        Assert.Contains(messages, m => m.Contains("NOT inspected", StringComparison.Ordinal));
+        Assert.DoesNotContain(messages, m => m.Contains("inspected and logged", StringComparison.Ordinal));
+    }
+
     // ----- Configuration -----
 
     [Theory]

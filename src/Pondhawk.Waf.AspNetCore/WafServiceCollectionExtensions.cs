@@ -74,7 +74,11 @@ public static class WafServiceCollectionExtensions
         var (waf, s) = (snapshot.Engine, snapshot.Settings);
         WafLog.Started(logger, waf.Config.RuleEngine, snapshot.Options.Profile, s.ParanoiaLevel, s.DetectionParanoiaLevel,
             s.InboundAnomalyScoreThreshold, s.InspectResponses, waf.Rules.Count);
-        if (waf.Config.RuleEngine != RuleEngineMode.On)
+        if (waf.Config.RuleEngine == RuleEngineMode.Off)
+        {
+            WafLog.Off(logger);
+        }
+        else if (waf.Config.RuleEngine != RuleEngineMode.On)
         {
             WafLog.NotBlocking(logger, waf.Config.RuleEngine);
         }
@@ -270,4 +274,7 @@ internal static partial class WafLog
 
     [LoggerMessage(EventId = 17, Level = LogLevel.Warning, Message = "Pondhawk WAF services are registered but the middleware is not: requests are NOT inspected. Call app.UsePondhawkWaf().")]
     public static partial void MiddlewareMissing(ILogger logger);
+
+    [LoggerMessage(EventId = 18, Level = LogLevel.Warning, Message = "Pondhawk WAF rule engine is Off: requests are NOT inspected, logged or blocked. Set WafOptions.RuleEngine = RuleEngineMode.DetectionOnly or RuleEngineMode.On to inspect.")]
+    public static partial void Off(ILogger logger);
 }
