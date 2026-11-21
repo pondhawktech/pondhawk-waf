@@ -13,6 +13,7 @@ Design and roadmap: [DESIGN.md](DESIGN.md). Usage: [README](../README.md).
 | `tests/Pondhawk.Waf.Tests` | Engine, parser, middleware, profile and security regression tests |
 | `tests/Pondhawk.Waf.LibInjection.Tests` | All libinjection test vectors |
 | `tests/Pondhawk.Waf.LibInjection.Fuzz` | Differential fuzzer: the libinjection port against libinjection-go |
+| `tests/Pondhawk.Waf.Pentest` | GoTestWAF target host, scan script and bypass triage |
 | `tests/Pondhawk.Waf.CrsRegression` | CRS and plugin regression suite runner (Kestrel, raw TCP) |
 | `samples/Pondhawk.Waf.Sample` | Minimal API sample |
 | `benchmarks/Pondhawk.Waf.Benchmarks` | Startup, per-request, large-body and response measurements |
@@ -69,6 +70,26 @@ tests/Pondhawk.Waf.LibInjection.Fuzz/run.sh --max-len 8192 --report fuzz.txt
 Each difference is minimized and printed with both results; the exit code is 1. A C# exception and a Go panic are
 differences too. To port a new libinjection-go release: update the version in `oracle/go.mod`, run the fuzzer, and
 fix each difference in the port or in its tests.
+
+## GoTestWAF scan
+
+`tests/Pondhawk.Waf.Pentest/run.sh` scans the WAF with GoTestWAF (in a docker or podman container, pinned by digest),
+once per profile, with `RuleEngine = On`. The target host accepts every method and path and reads the input. It
+takes about a minute for all four profiles. The `GoTestWAF scan` workflow runs the same script by hand and uploads
+the reports.
+
+```sh
+tests/Pondhawk.Waf.Pentest/run.sh                                  # all profiles, reports in ./pentest-reports
+tests/Pondhawk.Waf.Pentest/run.sh --profiles Balanced --triage     # also triage the bypasses
+```
+
+With `--triage`, the attack test sets run once more on Balanced; each request that passes is captured and replayed
+with paranoia level 4 detection. `triage-Balanced.md` groups the bypasses: first match at PL2-4 (a CRS paranoia
+trade-off), no CRS rule matches (payload encoded as Base64, or in a place CRS does not inspect for that attack), and
+"PL1 score >= 5", which must stay empty: a request there passed the blocking scan but scores as an attack.
+
+A bypass is a Pondhawk bug when a CRS rule that inspects that place should match the payload and does not. Check it
+with the rule's targets and pattern before opening an issue.
 
 ## Performance
 
