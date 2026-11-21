@@ -12,6 +12,7 @@ Design and roadmap: [DESIGN.md](DESIGN.md). Usage: [README](../README.md).
 | `src/Pondhawk.Waf.AspNetCore` | Middleware, options, profiles and DI registration |
 | `tests/Pondhawk.Waf.Tests` | Engine, parser, middleware, profile and security regression tests |
 | `tests/Pondhawk.Waf.LibInjection.Tests` | All libinjection test vectors |
+| `tests/Pondhawk.Waf.LibInjection.Fuzz` | Differential fuzzer: the libinjection port against libinjection-go |
 | `tests/Pondhawk.Waf.CrsRegression` | CRS and plugin regression suite runner (Kestrel, raw TCP) |
 | `samples/Pondhawk.Waf.Sample` | Minimal API sample |
 | `benchmarks/Pondhawk.Waf.Benchmarks` | Startup, per-request, large-body and response measurements |
@@ -45,6 +46,29 @@ Options: `--filter <rule-id or text>`, `--filter '942100-3$'` (exact), `--verbos
 
 `SecurityHardeningTests` holds one regression test per finding of the adversarial security review. A change that
 re-opens a bypass fails there.
+
+## libinjection differential fuzzer
+
+`src/Pondhawk.Waf.LibInjection` is a port of libinjection-go; `oracle/go.mod` pins the version it must match. The
+fuzzer sends the same bytes to both and compares `IsSQLi`, the fingerprint and `IsXSS`. It needs Go, podman or
+docker (for a `golang` container) to build the oracle.
+
+```sh
+tests/Pondhawk.Waf.LibInjection.Fuzz/run.sh                              # 1,000,000 inputs, random seed
+tests/Pondhawk.Waf.LibInjection.Fuzz/run.sh --count 25000000 --seed 7    # reproducible
+tests/Pondhawk.Waf.LibInjection.Fuzz/run.sh --max-len 8192 --report fuzz.txt
+```
+
+1. A sweep tries every SQLi keyword, XSS tag, event and attribute from the port's tables in fixed templates, every
+   byte, and every pair of special bytes.
+2. The fuzz phase mutates the test vectors, joins dictionary tokens, and adds random and long inputs (up to
+   `--max-len`, 512 by default; one input in ten is not cut).
+3. A Unicode phase (a tenth of `--count`, plus every keyword with I or S written as U+0131 or U+017F) checks .NET
+   strings with chars above U+00FF. The port encodes them as UTF-8; the harness computes Go's bytes on its own.
+
+Each difference is minimized and printed with both results; the exit code is 1. A C# exception and a Go panic are
+differences too. To port a new libinjection-go release: update the version in `oracle/go.mod`, run the fuzzer, and
+fix each difference in the port or in its tests.
 
 ## Performance
 

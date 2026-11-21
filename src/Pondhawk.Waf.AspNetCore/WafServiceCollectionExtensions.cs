@@ -51,6 +51,11 @@ public static class WafServiceCollectionExtensions
         services.AddMetrics();
         services.TryAddSingleton<WafMetrics>();
         services.TryAddSingleton<WafEngineProvider>();
+        if (!services.Any(d => d.ServiceType == typeof(WafStartupCheck)))
+        {
+            services.AddSingleton<WafStartupCheck>();
+            services.AddHostedService(sp => sp.GetRequiredService<WafStartupCheck>());
+        }
 
         // The engine for new requests; it changes on reload, so resolve it when needed instead of keeping it.
         services.TryAddTransient(sp => sp.GetRequiredService<WafEngineProvider>().Current);
@@ -74,6 +79,7 @@ public static class WafServiceCollectionExtensions
             WafLog.NotBlocking(logger, waf.Config.RuleEngine);
         }
 
+        app.ApplicationServices.GetService<WafStartupCheck>()?.MiddlewareAdded();
         return app.UseMiddleware<WafMiddleware>();
     }
 
@@ -261,4 +267,7 @@ internal static partial class WafLog
 
     [LoggerMessage(EventId = 16, Level = LogLevel.Warning, Message = "Pondhawk WAF warm-up failed; the first requests may be slower")]
     public static partial void WarmUpFailed(ILogger logger, Exception exception);
+
+    [LoggerMessage(EventId = 17, Level = LogLevel.Warning, Message = "Pondhawk WAF services are registered but the middleware is not: requests are NOT inspected. Call app.UsePondhawkWaf().")]
+    public static partial void MiddlewareMissing(ILogger logger);
 }

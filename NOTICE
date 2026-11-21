@@ -23,7 +23,7 @@ phpBB, phpMyAdmin and XenForo.
 
 libinjection-go (https://github.com/corazawaf/libinjection-go)
   Licensed under the BSD 3-Clause License. Copyright (c) 2022-Present, Coraza.
-  Ported to C# in src/Pondhawk.Waf.LibInjection (license: src/Pondhawk.Waf.LibInjection/LICENSE-libinjection.txt).
+  Version v0.3.6 ported to C# in src/Pondhawk.Waf.LibInjection (license: src/Pondhawk.Waf.LibInjection/LICENSE-libinjection.txt).
   libinjection was created by Nick Galbreath.
 
 WHATWG HTML named character references (https://html.spec.whatwg.org/entities.json)
