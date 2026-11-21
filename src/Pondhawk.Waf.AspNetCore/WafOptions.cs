@@ -57,6 +57,13 @@ public sealed class WafOptions
     /// </summary>
     public long? RequestBodyNoFilesLimit { get; set; }
 
+    /// <summary>
+    /// The regex engine for @rx patterns. Default <see cref="Waf.RegexEngine.NonBacktracking"/>: linear-time matching,
+    /// about 500 MB for the Core Rule Set. <see cref="Waf.RegexEngine.Backtracking"/>: about 16 MB, with a 250 ms timeout
+    /// per match. See the README, "Memory".
+    /// </summary>
+    public RegexEngine RegexEngine { get; set; }
+
     /// <summary>Returns the effective settings: the profile with the options above applied. Validates them.</summary>
     public WafSettings Resolve()
     {

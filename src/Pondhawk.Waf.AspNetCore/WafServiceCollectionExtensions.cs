@@ -73,7 +73,7 @@ public static class WafServiceCollectionExtensions
         var logger = app.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger("Pondhawk.Waf");
         var (waf, s) = (snapshot.Engine, snapshot.Settings);
         WafLog.Started(logger, waf.Config.RuleEngine, snapshot.Options.Profile, s.ParanoiaLevel, s.DetectionParanoiaLevel,
-            s.InboundAnomalyScoreThreshold, s.InspectResponses, waf.Rules.Count);
+            s.InboundAnomalyScoreThreshold, s.InspectResponses, snapshot.Options.RegexEngine, waf.Rules.Count);
         if (waf.Config.RuleEngine == RuleEngineMode.Off)
         {
             WafLog.Off(logger);
@@ -123,7 +123,7 @@ public static class WafServiceCollectionExtensions
     {
         var root = contentRoot ?? Directory.GetCurrentDirectory();
         var fs = new CompositeConfigFileSystem(CoreRuleSetFiles.FileSystem);
-        var builder = new WafBuilder(fs);
+        var builder = new WafBuilder(fs) { RegexEngine = options.RegexEngine };
         var errorLog = loggerFactory.CreateLogger("Pondhawk.Waf.Rules");
         var auditLog = loggerFactory.CreateLogger("Pondhawk.Waf.Audit");
         builder.Config.ErrorCallback = matched => WafLog.RuleMatched(errorLog, matched.ErrorLogLine());
@@ -257,8 +257,8 @@ internal static partial class WafLog
     [LoggerMessage(EventId = 11, Level = LogLevel.Information, Message = "{Entry}")]
     public static partial void Audit(ILogger logger, string entry);
 
-    [LoggerMessage(EventId = 12, Level = LogLevel.Information, Message = "Pondhawk WAF started: rule engine {RuleEngine}, profile {Profile}, paranoia level {ParanoiaLevel} (detection {DetectionParanoiaLevel}), inbound threshold {InboundThreshold}, response inspection {InspectResponses}, {RuleCount} rules")]
-    public static partial void Started(ILogger logger, RuleEngineMode ruleEngine, WafProfile profile, int paranoiaLevel, int detectionParanoiaLevel, int inboundThreshold, bool inspectResponses, int ruleCount);
+    [LoggerMessage(EventId = 12, Level = LogLevel.Information, Message = "Pondhawk WAF started: rule engine {RuleEngine}, profile {Profile}, paranoia level {ParanoiaLevel} (detection {DetectionParanoiaLevel}), inbound threshold {InboundThreshold}, response inspection {InspectResponses}, regex engine {RegexEngine}, {RuleCount} rules")]
+    public static partial void Started(ILogger logger, RuleEngineMode ruleEngine, WafProfile profile, int paranoiaLevel, int detectionParanoiaLevel, int inboundThreshold, bool inspectResponses, RegexEngine regexEngine, int ruleCount);
 
     [LoggerMessage(EventId = 13, Level = LogLevel.Warning, Message = "Pondhawk WAF rule engine is {RuleEngine}: requests are inspected and logged but NOT blocked. Set WafOptions.RuleEngine = RuleEngineMode.On to block.")]
     public static partial void NotBlocking(ILogger logger, RuleEngineMode ruleEngine);

@@ -58,7 +58,8 @@ To update a plugin, copy `plugins/*.conf` and `LICENSE` from its release into
 `src/Pondhawk.Waf.CoreRuleSet/plugins/<name>/`, its `tests/regression/*/*.yaml` into `plugin-tests/<name>/`, and
 update `plugins/VERSIONS`.
 
-Options: `--filter <rule-id or text>`, `--filter '942100-3$'` (exact), `--verbose`, `--debug`, `--report <file>`.
+Options: `--filter <rule-id or text>`, `--filter '942100-3$'` (exact), `--regex-engine backtracking`, `--verbose`,
+`--debug`, `--report <file>`.
 
 `SecurityHardeningTests` holds one regression test per finding of the adversarial security review. A change that
 re-opens a bypass fails there.

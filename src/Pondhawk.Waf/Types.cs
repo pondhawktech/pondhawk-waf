@@ -13,6 +13,24 @@ public enum RuleEngineMode
     Off,
 }
 
+/// <summary>The regex engine for @rx patterns. The trade-off is memory against a time bound per match.</summary>
+public enum RegexEngine
+{
+    /// <summary>
+    /// Linear-time matching (<c>RegexOptions.NonBacktracking</c>): no input can make a match slow. The automata of the
+    /// Core Rule Set hold about 500 MB for the life of the process. Patterns that need backtracking (lookarounds,
+    /// backreferences) use <see cref="Backtracking"/>.
+    /// </summary>
+    NonBacktracking,
+
+    /// <summary>
+    /// The backtracking engine (<c>RegexOptions.Compiled</c>) with a 250 ms timeout per match. The Core Rule Set holds
+    /// about 16 MB. A crafted input can make one match take up to the timeout; a match that times out counts as a match.
+    /// For small hosts.
+    /// </summary>
+    Backtracking,
+}
+
 /// <summary>SecAuditEngine.</summary>
 public enum AuditEngineMode
 {

@@ -383,6 +383,7 @@ options.RuleFiles.Add("/etc/myapp/rules.conf");
 | `RuleFiles` | none | SecLang files from disk, loaded last. Relative paths (also in `Include` and `@pmFromFile`) resolve against the content root |
 | `Bypass` | none | Predicate for requests that skip the WAF |
 | `UseCoreRuleSet` | `true` | Load the embedded CRS. The base configuration (body processing, limits) loads either way |
+| `RegexEngine` | `NonBacktracking` | `NonBacktracking`: linear-time matching, about 535 MB. `Backtracking`: about 65 MB, 250 ms timeout per match ([Memory](#memory)) |
 | `WarmUp` | `true` | After the regexes are built, run synthetic requests in the background, so the first real requests do not pay for building DFA states |
 | `HoldResponsesInDetectionOnly` | `false` | In DetectionOnly, hold inspected responses as `On` does, instead of streaming them and inspecting a copy |
 | `ReloadOnChange` | `true` | Rebuild the engine when bound configuration changes ([reload](#settings-from-appsettingsjson)) |
@@ -524,10 +525,34 @@ Failure behavior:
 
 - **Configuration errors** (invalid option values, bad directives, missing rule files) fail startup. After startup,
   a reload with errors keeps the current rules.
+- **Regex timeouts** (`RegexEngine = Backtracking`, or a rule that needs backtracking) count as a match.
 - **Engine errors** during a request fail the request (500). The request never reaches the application uninspected.
 - **Cost:** every rule runs over every byte of a body without files. At the 1 MiB default, a worst-case body costs
   about 0.2-0.4 s of CPU. Lower `RequestBodyNoFilesLimit` if your API does not need large bodies, and rate-limit
   clients in front of the application.
+
+
+### Memory
+
+The CRS regexes take most of the memory. Choose the engine with `RegexEngine`. Managed memory of one engine with CRS
+(`Balanced`), after `WafEngine.Compiled` completes and a full GC, on .NET 10:
+
+| `RegexEngine` | Managed memory | Build time | Worst case of one match |
+|---|---|---|---|
+| `NonBacktracking` (default) | about 535 MB | about 2 s | Linear in the input: no input makes a match slow |
+| `Backtracking` | about 65 MB | about 0.3 s | 250 ms, then the match counts as a match |
+
+Add the runtime and your application: an empty ASP.NET Core app uses about 56 MB RSS. Engines in one process share
+their regexes, so a reload or a second engine adds about 45 MB, not the regexes again.
+
+Use `Backtracking` on small hosts (2 GB or less). The trade-off: a crafted input can make one match run until the
+timeout. A rule over many arguments can then cost seconds of CPU for one request; keep `ArgumentsLimit` and
+`RequestBodyNoFilesLimit` low and rate-limit clients. A match that times out counts as a match, so a slow input cannot
+pass a rule: `On` blocks the request and `DetectionOnly` logs it. Both engines pass the full CRS regression suite.
+
+```json
+{ "Pondhawk": { "Waf": { "RegexEngine": "Backtracking" } } }
+```
 
 ## More
 

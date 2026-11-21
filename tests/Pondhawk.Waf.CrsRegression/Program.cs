@@ -23,6 +23,7 @@ var filter = ArgValue(args, "--filter");
 var reportPath = ArgValue(args, "--report");
 var verbose = args.Contains("--verbose");
 var debug = args.Contains("--debug");
+var regexEngine = Enum.Parse<Pondhawk.Waf.RegexEngine>(ArgValue(args, "--regex-engine") ?? "NonBacktracking", ignoreCase: true);
 var baseDir = AppContext.BaseDirectory;
 
 const string TestingConfig = """
@@ -72,6 +73,7 @@ WebApplication CreateApp(IEnumerable<Pondhawk.Waf.CoreRuleSet.CrsPlugin> plugins
     builder.Services.AddPondhawkWaf(o =>
     {
         o.Directives = TestingConfig;
+        o.RegexEngine = regexEngine;
         o.Plugins.AddRange(plugins);
         o.Configure = b =>
         {

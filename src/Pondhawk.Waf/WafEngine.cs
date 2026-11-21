@@ -173,27 +173,35 @@ public sealed class WafEngine
 /// <summary>Loads SecLang configuration into a new <see cref="WafEngine"/>.</summary>
 public sealed class WafBuilder
 {
-    private readonly SecLangParser _parser;
-    private readonly RegexCache _regexCache = new();
+    private readonly IConfigFileSystem _fileSystem;
+    private SecLangParser? _parser;
+    private RegexCache? _regexCache;
 
     public WafBuilder(IConfigFileSystem? fileSystem = null, WafConfig? config = null)
     {
         Config = config ?? new WafConfig();
-        _parser = new SecLangParser(Config, fileSystem ?? PhysicalConfigFileSystem.Instance, _regexCache);
+        _fileSystem = fileSystem ?? PhysicalConfigFileSystem.Instance;
     }
 
     public WafConfig Config { get; }
 
+    /// <summary>The regex engine for @rx patterns. Default <see cref="Waf.RegexEngine.NonBacktracking"/>.</summary>
+    public RegexEngine RegexEngine { get; init; }
+
+    private RegexCache Cache => _regexCache ??= new RegexCache { PreferNonBacktracking = RegexEngine == RegexEngine.NonBacktracking };
+
+    private SecLangParser Parser => _parser ??= new SecLangParser(Config, _fileSystem, Cache);
+
     /// <summary>Parses directives. Relative Include paths resolve against <paramref name="baseDirectory"/>.</summary>
     public WafBuilder AddDirectives(string directives, string baseDirectory = "")
     {
-        _parser.ParseString(directives, "<directives>", baseDirectory);
+        Parser.ParseString(directives, "<directives>", baseDirectory);
         return this;
     }
 
     public WafBuilder AddFile(string path)
     {
-        _parser.ParseFile(path);
+        Parser.ParseFile(path);
         return this;
     }
 
@@ -203,9 +211,10 @@ public sealed class WafBuilder
     /// </summary>
     public WafEngine Build()
     {
-        var rules = _parser.Finish();
-        var engine = new WafEngine(Config, rules, _parser.ReadsRuleCollection);
-        var cache = _regexCache;
+        var parser = Parser;
+        var rules = parser.Finish();
+        var engine = new WafEngine(Config, rules, parser.ReadsRuleCollection);
+        var cache = Cache;
         engine.Compiled = Task.Run(cache.CompileAll);
         return engine;
     }

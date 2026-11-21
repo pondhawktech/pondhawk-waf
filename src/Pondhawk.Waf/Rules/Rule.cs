@@ -297,10 +297,21 @@ public sealed class Rule
 
                 foreach (var carg in args)
                 {
-                    var result = op.Evaluate(tx, carg);
-                    if (OperatorNegated)
+                    bool result;
+                    try
                     {
-                        result = !result;
+                        result = op.Evaluate(tx, carg);
+                        if (OperatorNegated)
+                        {
+                            result = !result;
+                        }
+                    }
+                    catch (RegexMatchTimeoutException)
+                    {
+                        // A backtracking match ran out of time: the input is built to be slow. Count it as a match,
+                        // negated or not, so a slow input cannot pass a rule, and DetectionOnly logs it instead of failing
+                        // the request.
+                        result = true;
                     }
 
                     if (!result)

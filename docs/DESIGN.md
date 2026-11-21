@@ -42,7 +42,11 @@ HTTP request ─► WafMiddleware ──► Transaction ──► rules (phase 1
   RE2-compatible and compile this way; a test enforces it. The largest (932235, 10 KB) exceed .NET's default
   automaton limit, so `RegexCache` raises `REGEX_NONBACKTRACKING_MAX_AUTOMATA_SIZE` to 200,000 unless the host set
   it. A pattern that needs backtracking (user rules with lookarounds) uses the backtracking engine with a 250 ms
-  timeout.
+  timeout. A match that times out counts as a match, negated operator or not (`Rule.DoEvaluate`).
+- **Regex engine choice** (`WafOptions.RegexEngine`, #33). The NonBacktracking automata of CRS hold about 535 MB;
+  removing `(?i)` from every pattern about halved that in one measurement, but left more than 500 MB, so the
+  patterns stay as they are. `Backtracking` compiles every pattern with `RegexOptions.Compiled` and the 250 ms timeout: about 16 MB of
+  regexes. The rest of an engine (rules, data, prefilters) is about 45 MB either way.
 - **RE2 → .NET translation** (`RegexCache.TranslatePattern`): `\x{HH}`, `(?P<name>`, escaped punctuation as a range
   start inside a class (`[\--9]`, which .NET silently misreads; before the fix 11 CRS RCE regression tests failed),
   and a bare `[` inside a class (.NET class subtraction). `\w`, `\W`, `\d`, `\D`, `\s`, `\S` become explicit
