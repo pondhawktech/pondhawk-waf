@@ -1,4 +1,5 @@
 // Operator semantics follow OWASP Coraza (Apache-2.0).
+using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Globalization;
 using System.Net;
@@ -127,6 +128,13 @@ public sealed class RegexCache
 {
     private const string MaxAutomataSizeSwitch = "REGEX_NONBACKTRACKING_MAX_AUTOMATA_SIZE";
 
+    // Process-wide: every engine built from the same rules shares one Regex per pattern (#32). Regex is immutable and
+    // thread-safe. The key holds everything that changes the result. Entries live as long as the process; patterns
+    // come from rule files, so the store grows only when a reload brings new patterns.
+    private static readonly ConcurrentDictionary<(string Key, bool NonBacktracking, TimeSpan Timeout), Lazy<Regex>> SharedRegexes = new();
+    private static readonly ConcurrentDictionary<string, Lazy<RegexPrefilter?>> SharedPrefilters = new(StringComparer.Ordinal);
+
+    // This cache's patterns: the ones CompileAll builds.
     private readonly Dictionary<string, Lazy<Regex>> _cache = new(StringComparer.Ordinal);
 
     static RegexCache()
@@ -145,27 +153,11 @@ public sealed class RegexCache
     /// <summary>Skip @rx evaluation when a value lacks a literal every match needs (see <see cref="RegexPrefilter"/>). Default true.</summary>
     public bool UsePrefilter { get; init; } = true;
 
-    private readonly Dictionary<string, RegexPrefilter?> _prefilters = new(StringComparer.Ordinal);
-
     /// <summary>The prefilter for a SecLang pattern, or null.</summary>
-    internal RegexPrefilter? GetPrefilter(string pattern)
-    {
-        if (!UsePrefilter)
-        {
-            return null;
-        }
-
-        lock (_prefilters)
-        {
-            if (!_prefilters.TryGetValue(pattern, out var prefilter))
-            {
-                prefilter = RegexPrefilter.Create(pattern);
-                _prefilters[pattern] = prefilter;
-            }
-
-            return prefilter;
-        }
-    }
+    internal RegexPrefilter? GetPrefilter(string pattern) =>
+        UsePrefilter
+            ? SharedPrefilters.GetOrAdd(pattern, static p => new Lazy<RegexPrefilter?>(() => RegexPrefilter.Create(p), LazyThreadSafetyMode.ExecutionAndPublication)).Value
+            : null;
 
     /// <summary>Timeout for patterns that need the backtracking engine.</summary>
     public TimeSpan BacktrackingTimeout { get; init; } = TimeSpan.FromMilliseconds(250);
@@ -187,8 +179,14 @@ public sealed class RegexCache
             if (!_cache.TryGetValue(pattern, out var cached))
             {
                 const RegexOptions options = RegexOptions.Singleline | RegexOptions.Multiline;
-                _ = new Regex(TranslatePattern(pattern), RegexOptions.CultureInvariant | options);
-                cached = new Lazy<Regex>(() => Compile(pattern, options), LazyThreadSafetyMode.ExecutionAndPublication);
+                var key = (pattern, PreferNonBacktracking, BacktrackingTimeout);
+                if (!SharedRegexes.TryGetValue(key, out cached))
+                {
+                    // Not seen in this process: check the syntax now, so an invalid pattern fails the configuration.
+                    _ = new Regex(TranslatePattern(pattern), RegexOptions.CultureInvariant | options);
+                    cached = SharedRegexes.GetOrAdd(key, static k => new Lazy<Regex>(() => Compile(k.Key, options, k.NonBacktracking, k.Timeout), LazyThreadSafetyMode.ExecutionAndPublication));
+                }
+
                 _cache[pattern] = cached;
             }
 
@@ -196,7 +194,10 @@ public sealed class RegexCache
         }
     }
 
-    /// <summary>Builds every deferred regex, in parallel. A regex in use before this reaches it is built by its user.</summary>
+    /// <summary>
+    /// Builds every deferred regex, in parallel. A regex in use before this reaches it is built by its user; one another
+    /// engine in the process already built is shared and costs nothing.
+    /// </summary>
     internal void CompileAll()
     {
         Lazy<Regex>[] pending;
@@ -217,7 +218,8 @@ public sealed class RegexCache
         {
             if (!_cache.TryGetValue(key, out cached))
             {
-                cached = new Lazy<Regex>(() => Compile(pattern, RegexOptions.None), LazyThreadSafetyMode.ExecutionAndPublication);
+                cached = SharedRegexes.GetOrAdd((key, PreferNonBacktracking, BacktrackingTimeout),
+                    k => new Lazy<Regex>(() => Compile(pattern, RegexOptions.None, k.NonBacktracking, k.Timeout), LazyThreadSafetyMode.ExecutionAndPublication));
                 _cache[key] = cached;
             }
         }
@@ -225,11 +227,12 @@ public sealed class RegexCache
         return cached.Value;
     }
 
-    private Regex Compile(string pattern, RegexOptions extra)
+    // Static: a shared Lazy must not keep the RegexCache that created it alive.
+    private static Regex Compile(string pattern, RegexOptions extra, bool preferNonBacktracking, TimeSpan backtrackingTimeout)
     {
         var translated = TranslatePattern(pattern, remapHighBytes: extra != RegexOptions.None && UsesWordBoundary(pattern));
         var options = RegexOptions.CultureInvariant | extra;
-        if (PreferNonBacktracking)
+        if (preferNonBacktracking)
         {
             try
             {
@@ -244,12 +247,12 @@ public sealed class RegexCache
 
         try
         {
-            return new Regex(translated, options | RegexOptions.Compiled, BacktrackingTimeout);
+            return new Regex(translated, options | RegexOptions.Compiled, backtrackingTimeout);
         }
         catch (Exception ex) when (ex is not RegexParseException)
         {
             // The syntax was checked when the rule loaded; never fail a request over code generation.
-            return new Regex(translated, options, BacktrackingTimeout);
+            return new Regex(translated, options, backtrackingTimeout);
         }
     }
 
