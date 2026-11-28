@@ -530,8 +530,8 @@ Failure behavior:
 - **Regex timeouts** (`RegexEngine = Backtracking`, or a rule that needs backtracking) count as a match.
 - **Engine errors** during a request fail the request (500). The request never reaches the application uninspected.
 - **Cost:** every rule runs over every byte of a body without files. At the 1 MiB default, a worst-case body costs
-  about 0.2 s of CPU (170-190 ms measured on 0.2.7). Lower `RequestBodyNoFilesLimit` if your API does not need large bodies, and rate-limit
-  clients in front of the application.
+  about 0.2 s of CPU (170-190 ms measured on 0.2.7). Lower `RequestBodyNoFilesLimit` if your API does not need large
+  bodies, and rate-limit clients in front of the application.
 
 
 ### Memory
